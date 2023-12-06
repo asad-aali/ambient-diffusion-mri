@@ -20,6 +20,7 @@ import random
 import json
 from collections import OrderedDict
 import warnings
+import matplotlib.pyplot as plt
 
 def cdist_masked(x1, x2, mask1=None, mask2=None):
     if mask1 is None or mask2 is None:
@@ -92,7 +93,7 @@ def ambient_sampler(
             noisy_image = masked_image
 
             net_input = torch.cat([noisy_image, corruption_mask], dim=1)
-            net_output = net(net_input, t_hat, class_labels).to(torch.float64)[:, :3]
+            net_output = net(net_input, t_hat, class_labels).to(torch.float64)[:, :int(net.img_channels/2)]
             # print_tensor_stats(net_output, 'Denoised')
             if clipping:
                 net_output = tensor_clipping(net_output, static=static)
@@ -126,7 +127,7 @@ def ambient_sampler(
                 masked_image = corruption_mask * x_next
                 noisy_image = masked_image
                 net_input = torch.cat([noisy_image, corruption_mask], dim=1)
-                net_output = net(net_input, t_next, class_labels).to(torch.float64)[:, :3]
+                net_output = net(net_input, t_next, class_labels).to(torch.float64)[:, :int(net.img_channels/2)]
                 if clipping:
                     net_output = tensor_clipping(net_output, static=static)
                 
@@ -162,6 +163,7 @@ def ambient_sampler(
 @click.option('--class', 'class_idx',      help='Class label  [default: random]', metavar='INT',                    type=click.IntRange(min=0), default=None)
 @click.option('--batch', 'max_batch_size', help='Maximum batch size', metavar='INT',                                type=click.IntRange(min=1), default=64, show_default=True)
 
+@click.option('--img_channels', help='Channels for image', metavar='INT', type=int, default=3, show_default=True)
 @click.option('--corruption_probability', help='Probability of corruption', metavar='FLOAT', type=float, default=0.4, show_default=True)
 @click.option('--delta_probability', help='Probability of delta corruption', metavar='FLOAT', type=float, default=0.1, show_default=True)
 
@@ -201,7 +203,7 @@ def ambient_sampler(
 
 def main(with_wandb, network_loc, training_options_loc, outdir, subdirs, seeds, class_idx, max_batch_size, 
          # Ambient Diffusion Params
-         corruption_probability, delta_probability,
+         img_channels, corruption_probability, delta_probability,
          num_masks, guidance_scale, mask_full_rgb,
          # other params
          experiment_name, wandb_id, ref_path, num_expected, seed, eval_step, skip_generation,
@@ -242,7 +244,7 @@ def main(with_wandb, network_loc, training_options_loc, outdir, subdirs, seeds, 
             label_dim = num_classes
         else:
             label_dim = 0
-        interface_kwargs = dict(img_resolution=training_options['dataset_kwargs']['resolution'], label_dim=label_dim, img_channels=6)
+        interface_kwargs = dict(img_resolution=training_options['dataset_kwargs']['resolution'], label_dim=label_dim, img_channels=img_channels*2)
         network_kwargs = training_options['network_kwargs']
         model_to_be_initialized = dnnlib.util.construct_class_by_name(**network_kwargs, **interface_kwargs) # subclass of torch.nn.Module
 
@@ -310,7 +312,7 @@ def main(with_wandb, network_loc, training_options_loc, outdir, subdirs, seeds, 
 
                     # Pick latents and labels.
                     rnd = StackedRandomGenerator(device, batch_seeds)
-                    latents = rnd.randn([batch_size, 3, net.img_resolution, net.img_resolution], device=device)
+                    latents = rnd.randn([batch_size, int(net.img_channels/2), net.img_resolution, net.img_resolution], device=device)
                     class_labels = None
                     if net.label_dim:
                         class_labels = torch.eye(net.label_dim, device=device)[rnd.randint(net.label_dim, size=[batch_size], device=device)]
@@ -331,16 +333,28 @@ def main(with_wandb, network_loc, training_options_loc, outdir, subdirs, seeds, 
                     dist.print0(f"Saving loc: {image_dir}")
                     image_path = os.path.join(image_dir, f'collage-{curr_seed:06d}.png')
 
-                    # Save images.
-                    images_np = (images * 127.5 + 128).clip(0, 255).to(torch.uint8).permute(0, 2, 3, 1).cpu().numpy()
-                    for seed, image_np in zip(batch_seeds, images_np):
-                        image_dir = os.path.join(outdir, str(checkpoint_number), f'{seed-seed%1000:06d}') if subdirs else os.path.join(outdir, str(checkpoint_number))
-                        os.makedirs(image_dir, exist_ok=True)
-                        image_path = os.path.join(image_dir, f'{seed:06d}.png')
-                        if image_np.shape[2] == 1:
-                            PIL.Image.fromarray(image_np[:, :, 0], 'L').save(image_path)
-                        else:
-                            PIL.Image.fromarray(image_np, 'RGB').save(image_path)
+                    if img_channels == 2:
+                        images_np = images[:,0,...].cpu().detach() + 1j*images[:,1,...].cpu().detach()
+                        for seed, image_np in zip(batch_seeds, images_np):
+                            image_dir = os.path.join(outdir, str(checkpoint_number), f'{seed-seed%1000:06d}') if subdirs else os.path.join(outdir, str(checkpoint_number))
+                            os.makedirs(image_dir, exist_ok=True)
+                            image_path = os.path.join(image_dir, f'{seed:06d}.png')
+                            plt.figure(frameon=False)
+                            plt.imshow(torch.flipud(torch.abs(image_np)), cmap='gray')
+                            plt.axis('off')
+                            plt.savefig(image_path, transparent=True, bbox_inches='tight', pad_inches=0)
+                            plt.close()
+                    else:
+                        # Save images.
+                        images_np = (images * 127.5 + 128).clip(0, 255).to(torch.uint8).permute(0, 2, 3, 1).cpu().numpy()
+                        for seed, image_np in zip(batch_seeds, images_np):
+                            image_dir = os.path.join(outdir, str(checkpoint_number), f'{seed-seed%1000:06d}') if subdirs else os.path.join(outdir, str(checkpoint_number))
+                            os.makedirs(image_dir, exist_ok=True)
+                            image_path = os.path.join(image_dir, f'{seed:06d}.png')
+                            if image_np.shape[2] == 1:
+                                PIL.Image.fromarray(image_np[:, :, 0], 'L').save(image_path)
+                            else:
+                                PIL.Image.fromarray(image_np, 'RGB').save(image_path)
                     batch_count += 1
                     
                 dist.print0(f"Node finished generation for {checkpoint_number}")

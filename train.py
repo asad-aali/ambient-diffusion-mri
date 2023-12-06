@@ -71,6 +71,7 @@ def parse_int_list(s):
 @click.option('--delta_probability', help='Probability of corrupting a pixel that survived', metavar='FLOAT', default=0.1, show_default=True)
 @click.option('--mask_full_rgb', help='Whether to mask all the RGB channels together', metavar='BOOL', default=False, show_default=True)
 @click.option('--norm', help='Norm for loss', default=2, show_default=True)
+@click.option('--normalize', help='Normalization for training', default=True, show_default=True)
 @click.option('--gated', help='Whether to use gated convolutions', metavar='BOOL', default=True, show_default=True)
 @click.option('--corruption_pattern', help='Corruption pattern', metavar='dust|box|downscale|fixed_box', default='dust', show_default=True, required=False)
 @click.option('--max_size', help='Limit training samples.', type=int, default=None, show_default=True)
@@ -109,8 +110,8 @@ def main(**kwargs):
             project="ambient_diffusion",
             config=kwargs,
             name=opts.experiment_name,
-            id=opts.wandb_id if opts.resume is not None else '',
-            resume="must" if (opts.resume is not None and opts.wandb_id) else False
+            id=opts.wandb_id
+            # resume="must" if (opts.resume is not None and opts.wandb_id) else False
         )
 
 
@@ -118,9 +119,14 @@ def main(**kwargs):
     # Initialize config dict.
     c = dnnlib.EasyDict()
     c.update(max_grad_norm=opts.max_grad_norm)
-    c.dataset_kwargs = dnnlib.EasyDict(class_name='training.dataset.ImageFolderDataset', path=opts.data, use_labels=opts.cond, xflip=opts.xflip, cache=opts.cache, 
+    if "numpy" in opts.data:
+        c.dataset_kwargs = dnnlib.EasyDict(class_name='training.dataset.NumpyFolderDataset', path=opts.data, use_labels=opts.cond, xflip=opts.xflip, cache=opts.cache, 
                                        corruption_probability=opts.corruption_probability, delta_probability=opts.delta_probability, mask_full_rgb=opts.mask_full_rgb,
-                                       corruption_pattern=opts.corruption_pattern)
+                                       corruption_pattern=opts.corruption_pattern, normalize=opts.normalize)
+    else:
+        c.dataset_kwargs = dnnlib.EasyDict(class_name='training.dataset.ImageFolderDataset', path=opts.data, use_labels=opts.cond, xflip=opts.xflip, cache=opts.cache, 
+                                       corruption_probability=opts.corruption_probability, delta_probability=opts.delta_probability, mask_full_rgb=opts.mask_full_rgb,
+                                       corruption_pattern=opts.corruption_pattern, normalize=opts.normalize)
     c.data_loader_kwargs = dnnlib.EasyDict(pin_memory=True, num_workers=opts.workers, prefetch_factor=2)
     c.network_kwargs = dnnlib.EasyDict()
     c.loss_kwargs = dnnlib.EasyDict()

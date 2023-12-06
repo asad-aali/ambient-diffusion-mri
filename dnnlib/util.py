@@ -410,7 +410,7 @@ def list_dir(directory):
 
 def is_dir(directory):
     if not directory.startswith('s3://'):
-        return os.isdir(directory)
+        return os.path.isdir(directory)
     else:
         s3 = s3fs.S3FileSystem(anon=False)
         return s3.isdir(directory)       

@@ -103,7 +103,7 @@ class AmbientLoss:
         noisy_image = masked_image
 
         cat_input = torch.cat([noisy_image, hat_corruption_matrix], axis=1)
-        D_yn = net(cat_input, sigma, labels, augment_labels=augment_labels)[:, :3]
+        D_yn = net(cat_input, sigma, labels, augment_labels=augment_labels)[:, :y.shape[1]]
         
         if self.norm == 2:
             train_loss = weight * ((hat_corruption_matrix * (D_yn - y)) ** 2)
@@ -135,7 +135,7 @@ class AmbientVPLoss:
         y, augment_labels = augment_pipe(images) if augment_pipe is not None else (images, None)
         n = torch.randn_like(y) * sigma
         cat_input = torch.cat([hat_corruption_matrix * (y + n), hat_corruption_matrix], axis=1)
-        D_yn = net(cat_input, sigma, labels, augment_labels=augment_labels)[:, :3]
+        D_yn = net(cat_input, sigma, labels, augment_labels=augment_labels)[:, :y.shape[1]]
 
         if self.norm == 2:
             train_loss = weight * ((hat_corruption_matrix * (D_yn - y)) ** 2)

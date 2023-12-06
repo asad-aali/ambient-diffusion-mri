@@ -20,7 +20,7 @@ def get_random_mask(image_shape, survival_probability, mask_full_rgb=False, same
     
     if mask_full_rgb:
         corruption_mask = corruption_mask[:, 0]
-        corruption_mask = corruption_mask.repeat([3, 1, 1, 1]).transpose(1, 0)
+        corruption_mask = corruption_mask.repeat([image_shape[1], 1, 1, 1]).transpose(1, 0)
     return corruption_mask
 
 
