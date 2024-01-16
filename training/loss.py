@@ -92,22 +92,66 @@ class AmbientLoss:
         self.sigma_data = sigma_data
         self.norm = norm
 
-    def __call__(self, net, images, corruption_matrix, hat_corruption_matrix, labels=None, augment_pipe=None):
+    # Centered, orthogonal fft in torch >= 1.7
+    def fft(self, x):
+        x = torch.fft.fft2(x, dim=(-2, -1), norm='ortho')
+        return x
+
+    # Centered, orthogonal ifft in torch >= 1.7
+    def ifft(self, x):
+        x = torch.fft.ifft2(x, dim=(-2, -1), norm='ortho')
+        return x
+    
+    def forward(self, image, maps, mask):
+        coil_imgs = maps*image
+        coil_ksp = self.fft(coil_imgs)
+        sampled_ksp = mask*coil_ksp
+        return sampled_ksp
+
+    def adjoint(self, ksp, maps, mask):
+        sampled_ksp = mask*ksp
+        coil_imgs = self.ifft(sampled_ksp)
+        img_out = torch.sum(torch.conj(maps)*coil_imgs,dim=1)[:,None,...] #sum over coil dimension
+        return img_out
+
+    def __call__(self, net, images, corruption_matrix, hat_corruption_matrix, maps, labels=None, augment_pipe=None):        
+        images = images[:,:,:,32:352]
         rnd_normal = torch.randn([images.shape[0], 1, 1, 1], device=images.device)
         sigma = (rnd_normal * self.P_std + self.P_mean).exp()
         weight = (sigma ** 2 + self.sigma_data ** 2) / (sigma * self.sigma_data) ** 2
         y, augment_labels = augment_pipe(images) if augment_pipe is not None else (images, None)
         n = torch.randn_like(y) * sigma
-        
-        masked_image = hat_corruption_matrix * (y + n)
-        noisy_image = masked_image
 
-        cat_input = torch.cat([noisy_image, hat_corruption_matrix], axis=1)
+        y_noisy = y + n
+        y_noisy_cplx = y_noisy[:,0] + 1j*y_noisy[:,1]
+        y_noisy_cplx = y_noisy_cplx[:,None,...]
+        
+        noisy_image = self.adjoint(self.forward(y_noisy_cplx, maps, hat_corruption_matrix), maps, hat_corruption_matrix)
+        noisy_image = torch.cat((noisy_image.real, noisy_image.imag), dim=1)
+        
+        hat_corruption_matrix_new = torch.ones_like(noisy_image).cuda()
+        hat_corruption_matrix_new[:,0,:,:,] = hat_corruption_matrix[:,0]
+
+        cat_input = torch.cat([noisy_image, hat_corruption_matrix_new], axis=1)
         D_yn = net(cat_input, sigma, labels, augment_labels=augment_labels)[:, :y.shape[1]]
+
+        D_yn_cplx = D_yn[:,0] + 1j*D_yn[:,1]
+        D_yn_cplx = D_yn_cplx[:,None,...]
+        masked_D_yn = self.adjoint(self.forward(D_yn_cplx, maps, corruption_matrix), maps, corruption_matrix)
+        masked_D_yn = torch.cat((masked_D_yn.real, masked_D_yn.imag), dim=1)
+        masked_D_yn_hat = self.adjoint(self.forward(D_yn_cplx, maps, hat_corruption_matrix), maps, hat_corruption_matrix)
+        masked_D_yn_hat = torch.cat((masked_D_yn_hat.real, masked_D_yn_hat.imag), dim=1)
+
+        y_cplx = y[:,0] + 1j*y[:,1]
+        y_cplx = y_cplx[:,None,...]
+        masked_y = self.adjoint(self.forward(y_cplx, maps, corruption_matrix), maps, corruption_matrix)
+        masked_y = torch.cat((masked_y.real, masked_y.imag), dim=1)
+        masked_y_hat = self.adjoint(self.forward(y_cplx, maps, hat_corruption_matrix), maps, hat_corruption_matrix)
+        masked_y_hat = torch.cat((masked_y_hat.real, masked_y_hat.imag), dim=1)
         
         if self.norm == 2:
-            train_loss = weight * ((hat_corruption_matrix * (D_yn - y)) ** 2)
-            val_loss = weight * ((corruption_matrix * (D_yn - y)) ** 2)
+            train_loss = weight * ((masked_D_yn_hat - masked_y_hat) ** 2)
+            val_loss = weight * ((masked_D_yn - masked_y) ** 2)
             test_loss = weight * ((D_yn - y) ** 2)
         elif self.norm == 1:
             # l1 loss

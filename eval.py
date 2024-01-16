@@ -21,6 +21,7 @@ import json
 from collections import OrderedDict
 import warnings
 import matplotlib.pyplot as plt
+import zipfile
 
 def cdist_masked(x1, x2, mask1=None, mask2=None):
     if mask1 is None or mask2 is None:
@@ -31,6 +32,34 @@ def cdist_masked(x1, x2, mask1=None, mask2=None):
     combined_mask = mask1.unsqueeze(1) * mask2.unsqueeze(0)
     error = 0.5 * torch.linalg.norm(combined_mask * diffs)**2
     return error
+
+def fftmod(x):
+    x[...,::2,:] *= -1
+    x[...,:,::2] *= -1
+    return x
+
+# Centered, orthogonal fft in torch >= 1.7
+def fft(x):
+    x = torch.fft.fft2(x, dim=(-2, -1), norm='ortho')
+    return x
+
+# Centered, orthogonal ifft in torch >= 1.7
+def ifft(x):
+    x = torch.fft.ifft2(x, dim=(-2, -1), norm='ortho')
+    return x
+
+def forward(image, maps, mask):
+    coil_imgs = maps*image
+    coil_ksp = fft(coil_imgs)
+    sampled_ksp = mask*coil_ksp
+    return sampled_ksp
+
+def adjoint(ksp, maps, mask):
+    sampled_ksp = mask*ksp
+    coil_imgs = ifft(sampled_ksp)
+    img_out = torch.sum(torch.conj(maps)*coil_imgs,dim=1)[:,None,...] #sum over coil dimension
+
+    return img_out
 
 def ambient_sampler(
     net, latents, class_labels=None, randn_like=torch.randn_like,
@@ -54,13 +83,32 @@ def ambient_sampler(
     def sample_masks():
         masks = []
         for _ in range(num_masks):
+            survival_probability=0.54
             masks.append(get_random_mask(latents.shape, survival_probability, mask_full_rgb=mask_full_rgb, 
                                                 same_for_all_batch=same_for_all_batch, device=latents.device))
         masks = torch.stack(masks)
         return masks
-
+    
+    latents = latents[:,:,:,0:320]
     masks = sample_masks()
+    masks = torch.ones_like(masks).cuda()
+    file = zipfile.ZipFile("/home/asad/ambient-diffusion-mri/data/fastMRI/numpy/ksp_brainMRI_384.zip")
 
+    corr = 4
+    slice  = 0
+    
+    with file.open(str(slice) + "/maps.npy", 'r') as f:
+        map = np.load(f)
+
+    map = fftmod(map)
+    map = torch.tensor(map, dtype=torch.complex64).to(latents.device)
+    maps = torch.zeros([masks.shape[1], map.shape[0], map.shape[1], map.shape[2]], dtype=torch.complex64).cuda()
+
+    for i in range(masks.shape[1]):
+        with file.open(str(i) + "/mask_delta_" + str(corr+1) + ".npy", 'r') as f:
+            mask_delta = np.load(f)
+        masks[:,i,0] = torch.tensor(mask_delta)
+        maps[i] = map
 
     # Time step discretization.
     step_indices = torch.arange(num_steps, dtype=torch.float64, device=latents.device)
@@ -71,11 +119,6 @@ def ambient_sampler(
     x_next = latents.to(torch.float64) * t_steps[0]
 
     for i, (t_cur, t_next) in enumerate(zip(t_steps[:-1], t_steps[1:])): # 0, ..., N-1
-        if resample_guidance_masks:
-            guidance_masks = sample_masks()
-            masks[:, 1:] = guidance_masks[:, 1:]
-
-
         x_cur = x_next
 
         # Increase noise temporarily.
@@ -89,8 +132,13 @@ def ambient_sampler(
         denoised = []
         for mask_index in range(num_masks):
             corruption_mask = masks[mask_index]
-            masked_image = corruption_mask * x_hat
-            noisy_image = masked_image
+            x_hat_cplx = x_hat[:,0] + 1j*x_hat[:,1]
+            x_hat_cplx = x_hat_cplx[:,None,...]
+            masked_x_hat = adjoint(forward(x_hat_cplx, maps, corruption_mask[:,0][:,None]), maps, corruption_mask[:,0][:,None])
+            masked_x_hat = torch.cat((masked_x_hat.real, masked_x_hat.imag), dim=1)
+
+            # masked_image = corruption_mask * x_hat
+            noisy_image = masked_x_hat
 
             net_input = torch.cat([noisy_image, corruption_mask], dim=1)
             net_output = net(net_input, t_hat, class_labels).to(torch.float64)[:, :int(net.img_channels/2)]
@@ -124,7 +172,13 @@ def ambient_sampler(
             denoised = []
             for mask_index in range(num_masks):
                 corruption_mask = masks[mask_index]
-                masked_image = corruption_mask * x_next
+
+                x_next_cplx = x_next[:,0] + 1j*x_next[:,1]
+                x_next_cplx = x_next_cplx[:,None,...]
+                masked_image = adjoint(forward(x_next_cplx, maps, corruption_mask[:,0][:,None]), maps, corruption_mask[:,0][:,None])
+                masked_image = torch.cat((masked_image.real, masked_image.imag), dim=1)
+                
+                # masked_image = corruption_mask * x_next
                 noisy_image = masked_image
                 net_input = torch.cat([noisy_image, corruption_mask], dim=1)
                 net_output = net(net_input, t_next, class_labels).to(torch.float64)[:, :int(net.img_channels/2)]

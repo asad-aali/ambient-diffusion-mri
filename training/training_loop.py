@@ -142,13 +142,18 @@ def training_loop(
                     images, labels, corruption_matrix, hat_corruption_matrix = dataset_iter
                     corruption_matrix = corruption_matrix.to(device)
                     hat_corruption_matrix = hat_corruption_matrix.to(device)
+                elif len(dataset_iter) == 5:
+                    images, labels, corruption_matrix, hat_corruption_matrix, maps = dataset_iter
+                    corruption_matrix = corruption_matrix.to(device)
+                    hat_corruption_matrix = hat_corruption_matrix.to(device)
+                    maps = maps.to(device)
                 else:
                     raise ValueError(f"Invalid dataset iterator length: {len(dataset_iter)}")
                 images = images.to(device).to(torch.float32)
                 labels = labels.to(device)
 
                 train_loss, val_loss, test_loss = loss_fn(net=ddp, images=images, labels=labels, augment_pipe=augment_pipe, 
-                    corruption_matrix=corruption_matrix, hat_corruption_matrix=hat_corruption_matrix)
+                    corruption_matrix=corruption_matrix, hat_corruption_matrix=hat_corruption_matrix, maps=maps)
                 loss = val_loss
                 
                 training_stats.report('Loss/loss', loss)

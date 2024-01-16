@@ -22,30 +22,106 @@ from collections import OrderedDict
 import warnings
 from training.dataset import ImageFolderDataset
 from torch_utils import misc
-import sys
+import matplotlib.pyplot as plt
+import sigpy as sp
 
+def fftmod(x):
+    x[...,::2,:] *= -1
+    x[...,:,::2] *= -1
+    return x
 
+# Centered, orthogonal fft in torch >= 1.7
+def fft(x):
+    x = torch.fft.fft2(x, dim=(-2, -1), norm='ortho')
+    return x
+
+# Centered, orthogonal ifft in torch >= 1.7
+def ifft(x):
+    x = torch.fft.ifft2(x, dim=(-2, -1), norm='ortho')
+    return x
+
+def forward(image, maps, mask):
+    coil_imgs = maps*image
+    coil_ksp = fft(coil_imgs)
+    sampled_ksp = mask*coil_ksp
+    return sampled_ksp
+
+def adjoint(ksp, maps, mask):
+    sampled_ksp = mask*ksp
+    coil_imgs = ifft(sampled_ksp)
+    img_out = torch.sum(torch.conj(maps)*coil_imgs,dim=1)[:,None,...] #sum over coil dimension
+
+    return img_out
+
+def create_masks(R, delta_R, acs_lines, LENGTH):
+    total_lines = LENGTH
+    num_sampled_lines = np.floor(total_lines / R)
+    center_line_idx = np.arange((total_lines - acs_lines) // 2,(total_lines + acs_lines) // 2)
+    outer_line_idx = np.setdiff1d(np.arange(total_lines), center_line_idx)
+    random_line_idx = np.random.choice(outer_line_idx,size=int(num_sampled_lines - acs_lines), replace=False)
+    mask = np.zeros((total_lines, total_lines))
+    mask[:,center_line_idx] = 1.
+    mask[:,random_line_idx] = 1.
+    
+    random.shuffle(random_line_idx)
+    further_mask = mask.copy()
+    further_mask[:, random_line_idx[0:delta_R]] = 0.
+
+    mask = sp.resize(mask, [384, 320])
+    further_mask = sp.resize(further_mask, [384, 320])
+    mask[0:32] = mask[32:64]
+    mask[352:384] = mask[32:64]
+    further_mask[0:32] = further_mask[32:64]
+    further_mask[352:384] = further_mask[32:64]
+
+    return torch.tensor(further_mask[None])
 
 def ambient_sampler(
-    net, latents, corrupted_images, operator, operator_params, class_labels=None, randn_like=torch.randn_like,
+    net, latents, class_labels=None, randn_like=torch.randn_like,
     num_steps=18, sigma_min=0.002, sigma_max=80, rho=7,
     S_churn=0, S_min=0, S_max=float('inf'), S_noise=1,
     sampler_seed=42, survival_probability=0.54,
+    delta_probability=None,
     mask_full_rgb=False,
     same_for_all_batch=False,
     clipping=True,
-    static=True,  # whether to use soft clipping or static clipping
-    dps_scale=5.0,
+    static=True,  # whether to use soft clipping or static clipping'
+    measurements_path=None
 ):
-    dist.print0("Working with DPS scale: ", dps_scale)
+    latents = latents[:,:,:,0:320]
+    contents = torch.load(measurements_path)
+
+    print('\nForwardFastMRI Dataloader:\n')
+    ksp      = fftmod(contents['ksp_undersampled'])[None].cuda() # shape: [1,C,H,W]
+    maps     = fftmod(contents['s_map'])[None].cuda() # shape: [1,C,H,W]
+    mask     = contents['mask'][None].cuda() # shape: [1,1,H,W]
+    gt_img   = contents['gt'][None,None].cuda() # shape [1,1,H,W]
+    Y_adj    = adjoint(ksp, maps, mask).cuda()
+
+    min_nrmse_img = None
+    min_nrmse = torch.inf
+
+    print('Adjoint Shape: ' + str(Y_adj.shape) + '\n')
+    print('Maps Shape: ' + str(maps.shape) + '\n')
+    print('Mask Shape: ' + str(mask.shape) + '\n')
+    print('Image Shape: ' + str(gt_img.shape) + '\n')
+
     # Adjust noise levels based on what's supported by the network.
     sigma_min = max(sigma_min, net.sigma_min)
     sigma_max = min(sigma_max, net.sigma_max)
 
-    corruption_mask = get_random_mask(latents.shape, survival_probability, 
-        mask_full_rgb=mask_full_rgb, same_for_all_batch=same_for_all_batch, 
-        device=latents.device)
+    corruption_mask = torch.ones([1, 2, Y_adj.shape[2], Y_adj.shape[3]]).to(device=latents.device)
+    
+    if delta_probability == 3:
+        corruption_mask[:,0] = create_masks(R=2, delta_R=54, acs_lines=20, LENGTH=Y_adj.shape[-1])
+    elif delta_probability == 5:
+        corruption_mask[:,0] = create_masks(R=4, delta_R=16, acs_lines=20, LENGTH=Y_adj.shape[-1])
+    elif delta_probability == 7:
+        corruption_mask[:,0] = create_masks(R=6, delta_R=8, acs_lines=20, LENGTH=Y_adj.shape[-1])
+    elif delta_probability == 9:
+        corruption_mask[:,0] = create_masks(R=8, delta_R=5, acs_lines=20, LENGTH=Y_adj.shape[-1])
 
+    print("\nDelta Mask R=5: " + str(float((384*320)/torch.sum(corruption_mask[:,0][0]))))
 
     # Time step discretization.
     step_indices = torch.arange(num_steps, dtype=torch.float32, device=latents.device)
@@ -57,7 +133,6 @@ def ambient_sampler(
 
     for i, (t_cur, t_next) in enumerate(zip(t_steps[:-1], t_steps[1:])): # 0, ..., N-1
         x_cur = x_next
-
         # Increase noise temporarily.
         gamma = min(S_churn / num_steps, np.sqrt(2) - 1) if S_min <= t_cur <= S_max else 0
         t_hat = net.round_sigma(t_cur + gamma * t_cur)
@@ -66,24 +141,29 @@ def ambient_sampler(
         x_hat = x_hat.detach()
         x_hat.requires_grad = True
 
-
-        masked_image = corruption_mask * x_hat
-        noisy_image = masked_image
+        x_hat_cplx = x_hat[:,0] + 1j*x_hat[:,1]
+        x_hat_cplx = x_hat_cplx[:,None,...]
+        masked_x_hat = adjoint(forward(x_hat_cplx, maps, corruption_mask[:,0][:,None]), maps, corruption_mask[:,0][:,None])
+        noisy_image = torch.cat((masked_x_hat.real, masked_x_hat.imag), dim=1)
 
         if net.img_channels == 3:
             net_input = noisy_image
         else:
             net_input = torch.cat([noisy_image, corruption_mask], dim=1)
-        net_output = net(net_input, t_hat, class_labels).to(torch.float32)[:, :3]
-        # print_tensor_stats(net_output, 'Denoised')
+        net_output = net(net_input, t_hat, class_labels).to(torch.float64)[:, :int(net.img_channels/2)]
+
         if clipping:
             net_output = tensor_clipping(net_output, static=static)
         
-        corrupted_net_output = operator.corrupt(net_output, operator_params)[0]
+        net_output_cplx = net_output[:,0] + 1j*net_output[:,1]
+        net_output_cplx = net_output_cplx[:,None,...]
+        masked_net_output = adjoint(forward(net_output_cplx, maps, mask), maps, mask)
+
         # compute mse between corrupted_net_output and corrupted_images        
-        dps_grad_1 = -torch.autograd.grad(outputs=torch.linalg.norm(corrupted_net_output - corrupted_images), inputs=x_hat)[0]
+        dps_grad_1 = -torch.autograd.grad(outputs=torch.linalg.norm(masked_net_output - Y_adj), inputs=x_hat)[0]
 
         denoising_grad_1 = (t_next - t_hat) * (x_hat - net_output) / t_hat
+        dps_scale = torch.linalg.norm(denoising_grad_1) / torch.linalg.norm(dps_grad_1)
 
         grad_1 = denoising_grad_1 + dps_scale * dps_grad_1
         x_next += grad_1
@@ -92,28 +172,43 @@ def ambient_sampler(
             x_next = x_next.detach()
             x_next.requires_grad = True
 
-            masked_image = corruption_mask * x_next
+            x_next_cplx = x_next[:,0] + 1j*x_next[:,1]
+            x_next_cplx = x_next_cplx[:,None,...]
+            masked_image = adjoint(forward(x_next_cplx, maps, corruption_mask[:,0][:,None]), maps, corruption_mask[:,0][:,None])
+            noisy_image = torch.cat((masked_image.real, masked_image.imag), dim=1)
             if net.img_channels == 3:
                 net_input = masked_image
             else:
-                net_input = torch.cat([masked_image, corruption_mask], dim=1)
-            net_output = net(net_input, t_next, class_labels).to(torch.float32)[:, :3]
+                net_input = torch.cat([noisy_image, corruption_mask], dim=1)
+            net_output = net(net_input, t_next, class_labels).to(torch.float64)[:, :int(net.img_channels/2)]
 
             if clipping:
                 net_output = tensor_clipping(net_output, static=static)
 
-            corrupted_net_output = operator.corrupt(net_output, operator_params)[0]
+            net_output_cplx = net_output[:,0] + 1j*net_output[:,1]
+            net_output_cplx = net_output_cplx[:,None,...]
+            masked_net_output = adjoint(forward(net_output_cplx, maps, mask), maps, mask)
+
             # compute mse between corrupted_net_output and corrupted_images        
-            dps_grad_2 = -torch.autograd.grad(outputs=torch.linalg.norm(corrupted_net_output - corrupted_images), inputs=x_next)[0]
+            dps_grad_2 = -torch.autograd.grad(outputs=torch.linalg.norm(masked_net_output - Y_adj), inputs=x_next)[0]
 
             denoising_grad_2 = (t_next - t_hat) * (x_next - net_output) / t_next
+            dps_scale = torch.linalg.norm(denoising_grad_2) / torch.linalg.norm(dps_grad_2)
 
             grad_2 = denoising_grad_2 + dps_scale * dps_grad_2
             x_next = x_hat + 0.5 * (grad_1 + grad_2)
         else:
-            clean_image = x_next
             x_next = x_hat + grad_1
-    return x_next
+
+        x_next_cplx = x_next[:,0] + 1j*x_next[:,1]
+        x_next_cplx = x_next_cplx[:,None,...]
+        nrmse = torch.linalg.norm(gt_img-x_next_cplx) / torch.linalg.norm(gt_img)
+        if nrmse < min_nrmse:
+            min_nrmse = nrmse
+            min_nrmse_img = x_next
+        print("Step " + str(i) + " - NRMSE: " + str(float(min_nrmse)))
+
+    return min_nrmse_img, Y_adj, gt_img
 
 
 
@@ -127,6 +222,7 @@ def ambient_sampler(
 @click.option('--class', 'class_idx',      help='Class label  [default: random]', metavar='INT',                    type=click.IntRange(min=0), default=None)
 @click.option('--batch', 'max_batch_size', help='Maximum batch size', metavar='INT',                                type=click.IntRange(min=1), default=64, show_default=True)
 
+@click.option('--img_channels', help='Channels for image', metavar='INT', type=int, default=3, show_default=True)
 @click.option('--corruption_probability', help='Probability of corruption', metavar='FLOAT', type=float, default=0.4, show_default=True)
 @click.option('--delta_probability', help='Probability of delta corruption', metavar='FLOAT', type=float, default=0.1, show_default=True)
 
@@ -184,11 +280,10 @@ def ambient_sampler(
 @click.option('--disc', 'discretization',  help='Ablate time step discretization {t_i}', metavar='vp|ve|iddpm|edm', type=click.Choice(['vp', 've', 'iddpm', 'edm']))
 @click.option('--schedule',                help='Ablate noise schedule sigma(t)', metavar='vp|ve|linear',           type=click.Choice(['vp', 've', 'linear']))
 @click.option('--scaling',                 help='Ablate signal scaling s(t)', metavar='vp|none',                    type=click.Choice(['vp', 'none']))
-@click.option('--dps_scale', help='Scale of the DPS term', metavar='FLOAT', type=float, default=5.0, show_default=True)
 
 def main(with_wandb, network_loc, training_options_loc, outdir, subdirs, seeds, class_idx, max_batch_size, 
          # Ambient Diffusion Params
-         corruption_probability, delta_probability,
+         img_channels, corruption_probability, delta_probability,
          mask_full_rgb,
          # other params
          experiment_name, wandb_id, ref_path, num_expected, seed, eval_step, skip_generation,
@@ -197,6 +292,7 @@ def main(with_wandb, network_loc, training_options_loc, outdir, subdirs, seeds, 
          blur_type, kernel_size, kernel_std, 
          measurements_path,
          device=torch.device('cuda'),  **sampler_kwargs):
+    os.environ["CUDA_VISIBLE_DEVICES"] = "3"
     torch.multiprocessing.set_start_method('spawn')
     dist.init()
     survival_probability = (1 - corruption_probability) * (1 - delta_probability)
@@ -204,17 +300,6 @@ def main(with_wandb, network_loc, training_options_loc, outdir, subdirs, seeds, 
     # Hence, the following measures how many batches are going to be per GPU.
     seeds = seeds[:num_expected]
     num_batches = ((len(seeds) - 1) // (max_batch_size * dist.get_world_size()) + 1) * dist.get_world_size()
-
-    # Loading operator
-    operator = get_operator(corruption_pattern, corruption_probability=operator_corruption_probability, delta_probability=0.0, downsampling_factor=downsampling_factor, 
-        blur_type=blur_type, kernel_size=kernel_size, kernel_std=kernel_std, num_measurements=num_measurements)
-
-    # Loading dataset with reference images
-    train_dataset = ImageFolderDataset(path=measurements_path,
-                                corruption_probability=0.0, delta_probability=0.0,
-                                corruption_pattern="dust", mask_full_rgb=True)
-    sampler = misc.InfiniteSampler(dataset=train_dataset, rank=dist.get_rank(), num_replicas=dist.get_world_size(), seed=42, shuffle=False)
-    train_dataloader = iter(torch.utils.data.DataLoader(dataset=train_dataset, sampler=sampler, batch_size=max_batch_size, shuffle=False))
 
     dist.print0(f"The algorithm will run for {num_batches} batches --  {len(seeds)} images of batch size {max_batch_size}")
     all_batches = torch.as_tensor(seeds).tensor_split(num_batches)
@@ -242,8 +327,7 @@ def main(with_wandb, network_loc, training_options_loc, outdir, subdirs, seeds, 
             label_dim = num_classes
         else:
             label_dim = 0
-        interface_kwargs = dict(img_resolution=training_options['dataset_kwargs']['resolution'], label_dim=label_dim, img_channels=6)
-
+        interface_kwargs = dict(img_resolution=training_options['dataset_kwargs']['resolution'], label_dim=label_dim, img_channels=img_channels*2)
         network_kwargs = training_options['network_kwargs']
         model_to_be_initialized = dnnlib.util.construct_class_by_name(**network_kwargs, **interface_kwargs) # subclass of torch.nn.Module
 
@@ -263,9 +347,10 @@ def main(with_wandb, network_loc, training_options_loc, outdir, subdirs, seeds, 
             checkpoint_numbers = np.array(checkpoint_numbers)
 
             if len(sorted_pkl_files) == 0:
-                dist.print0("No new checkpoint found! Exiting!")
-                sys.exit(0)
-
+                dist.print0("No new checkpoint found! Going to sleep for 1min!")
+                time.sleep(60)
+                dist.print0("Woke up!")
+            
             for checkpoint_number, checkpoint in zip(checkpoint_numbers, sorted_pkl_files):
                 # Rank 0 goes first.
                 if dist.get_rank() != 0:
@@ -310,7 +395,7 @@ def main(with_wandb, network_loc, training_options_loc, outdir, subdirs, seeds, 
 
                     # Pick latents and labels.
                     rnd = StackedRandomGenerator(device, batch_seeds)
-                    latents = rnd.randn([batch_size, 3, net.img_resolution, net.img_resolution], device=device)
+                    latents = rnd.randn([batch_size, int(net.img_channels/2), net.img_resolution, net.img_resolution], device=device)
                     class_labels = None
                     if net.label_dim:
                         class_labels = torch.eye(net.label_dim, device=device)[rnd.randint(net.label_dim, size=[batch_size], device=device)]
@@ -319,44 +404,55 @@ def main(with_wandb, network_loc, training_options_loc, outdir, subdirs, seeds, 
                         class_labels[:, class_idx] = 1
 
                     # load images from dataset
-                    ref_images = next(train_dataloader)[0][:, :3].to(device)
-                    corrupted_images, operator_params = operator.corrupt(ref_images)
                     curr_seed = batch_seeds[0]
                     os.makedirs(os.path.join(outdir, str(checkpoint_number)), exist_ok=True)
-                    try:
-                        save_images(corrupted_images, os.path.join(outdir, str(checkpoint_number), f'corrupted-{curr_seed:06d}.png'))
-                    except:
-                        print("Failed to save corrupted images. Maybe they are measurements?")
-                    save_images(ref_images, os.path.join(outdir, str(checkpoint_number), f'ref-{curr_seed:06d}.png'))
 
                     # Generate images.
                     sampler_kwargs = {key: value for key, value in sampler_kwargs.items() if value is not None}
-
-
-                    images = ambient_sampler(net, latents, corrupted_images, operator, 
-                        operator_params, class_labels, 
-                        randn_like=rnd.randn_like, sampler_seed=batch_seeds,
-                        survival_probability=survival_probability, 
-                        mask_full_rgb=mask_full_rgb, **sampler_kwargs)
+                    images, adj, gt = ambient_sampler(net, latents, class_labels, randn_like=rnd.randn_like, sampler_seed=batch_seeds,
+                        survival_probability=survival_probability, delta_probability=delta_probability, mask_full_rgb=mask_full_rgb, 
+                        measurements_path=measurements_path, **sampler_kwargs)
 
                     image_dir = os.path.join(outdir, str(checkpoint_number), 
                                             f'collage-{curr_seed-curr_seed%1000:06d}') if subdirs else os.path.join(outdir, str(checkpoint_number), "collages")
 
-
                     dist.print0(f"Saving loc: {image_dir}")
                     image_path = os.path.join(image_dir, f'collage-{curr_seed:06d}.png')
-                    save_images(images, os.path.join(outdir, str(checkpoint_number), f'fixed-{curr_seed:06d}.png'))
+                    if img_channels == 2:
+                        images_np = images[:,0,...].cpu().detach() + 1j*images[:,1,...].cpu().detach()
+                        for seed, image_np in zip(batch_seeds, images_np):
+                            image_dir = os.path.join(outdir, str(checkpoint_number), f'{seed-seed%1000:06d}') if subdirs else os.path.join(outdir, str(checkpoint_number))
+                            os.makedirs(image_dir, exist_ok=True)
+                            image_path = os.path.join(image_dir, f'{seed:06d}.png')
+                            plt.figure(frameon=False)
+                            plt.imshow(torch.flipud(torch.abs(image_np)), cmap='gray', vmax=1)
+                            plt.axis('off')
+                            plt.savefig(image_path, transparent=True, bbox_inches='tight', pad_inches=0)
+                            plt.close()
+                            torch.save({'recon': image_np}, os.path.join(image_dir, f'{seed:06d}.pt'))
 
-                    # Save images.
-                    images_np = (images * 127.5 + 128).clip(0, 255).to(torch.uint8).permute(0, 2, 3, 1).cpu().numpy()
-                    for seed, image_np in zip(batch_seeds, images_np):
-                        image_dir = os.path.join(outdir, str(checkpoint_number), f'{seed-seed%1000:06d}') if subdirs else os.path.join(outdir, str(checkpoint_number))
-                        os.makedirs(image_dir, exist_ok=True)
-                        image_path = os.path.join(image_dir, f'{seed:06d}.png')
-                        if image_np.shape[2] == 1:
-                            PIL.Image.fromarray(image_np[:, :, 0], 'L').save(image_path)
-                        else:
-                            PIL.Image.fromarray(image_np, 'RGB').save(image_path)
+                            plt.figure(frameon=False)
+                            plt.imshow(torch.flipud(torch.abs(adj[0,0].cpu().detach())), cmap='gray', vmax=1)
+                            plt.axis('off')
+                            plt.savefig(os.path.join(image_dir, f'{seed:06d}_adj.png'), transparent=True, bbox_inches='tight', pad_inches=0)
+                            plt.close()
+
+                            plt.figure(frameon=False)
+                            plt.imshow(torch.flipud(torch.abs(gt[0,0].cpu().detach())), cmap='gray', vmax=1)
+                            plt.axis('off')
+                            plt.savefig(os.path.join(image_dir, f'{seed:06d}_gt.png'), transparent=True, bbox_inches='tight', pad_inches=0)
+                            plt.close()
+                    else:
+                        # Save images.
+                        images_np = (images * 127.5 + 128).clip(0, 255).to(torch.uint8).permute(0, 2, 3, 1).cpu().numpy()
+                        for seed, image_np in zip(batch_seeds, images_np):
+                            image_dir = os.path.join(outdir, str(checkpoint_number), f'{seed-seed%1000:06d}') if subdirs else os.path.join(outdir, str(checkpoint_number))
+                            os.makedirs(image_dir, exist_ok=True)
+                            image_path = os.path.join(image_dir, f'{seed:06d}.png')
+                            if image_np.shape[2] == 1:
+                                PIL.Image.fromarray(image_np[:, :, 0], 'L').save(image_path)
+                            else:
+                                PIL.Image.fromarray(image_np, 'RGB').save(image_path)
                     batch_count += 1
                     
                 dist.print0(f"Node finished generation for {checkpoint_number}")
