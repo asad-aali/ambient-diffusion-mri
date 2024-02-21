@@ -74,7 +74,10 @@ def training_loop(
 
     # Construct network.
     dist.print0('Constructing network...')
-    interface_kwargs = dict(img_resolution=dataset_obj.resolution, label_dim=dataset_obj.label_dim, img_channels=2 * dataset_obj.num_channels)
+    if dataset_obj.precond == "ambient":
+        interface_kwargs = dict(img_resolution=dataset_obj.resolution, label_dim=dataset_obj.label_dim, img_channels=2*dataset_obj.num_channels)
+    else:
+        interface_kwargs = dict(img_resolution=dataset_obj.resolution, label_dim=dataset_obj.label_dim, img_channels=dataset_obj.num_channels)
     net = dnnlib.util.construct_class_by_name(**network_kwargs, **interface_kwargs) # subclass of torch.nn.Module
 
 
@@ -137,29 +140,29 @@ def training_loop(
                 dataset_iter = next(dataset_iterator)
                 if len(dataset_iter) == 2:
                     images, labels = dataset_iter
-                    corruption_matrix = None
-                elif len(dataset_iter) == 4:
-                    images, labels, corruption_matrix, hat_corruption_matrix = dataset_iter
-                    corruption_matrix = corruption_matrix.to(device)
-                    hat_corruption_matrix = hat_corruption_matrix.to(device)
+                    images = images.to(device).to(torch.float32)
+                    labels = labels.to(device)
+
+                    loss = loss_fn(net=ddp, images=images, labels=labels, augment_pipe=augment_pipe)
+                    training_stats.report('Loss/loss', loss)
+
                 elif len(dataset_iter) == 5:
                     images, labels, corruption_matrix, hat_corruption_matrix, maps = dataset_iter
                     corruption_matrix = corruption_matrix.to(device)
                     hat_corruption_matrix = hat_corruption_matrix.to(device)
                     maps = maps.to(device)
+                    images = images.to(device).to(torch.float32)
+                    labels = labels.to(device)
+
+                    train_loss, val_loss, test_loss = loss_fn(net=ddp, images=images, labels=labels, augment_pipe=augment_pipe, 
+                    corruption_matrix=corruption_matrix, hat_corruption_matrix=hat_corruption_matrix, maps=maps)
+                    loss = val_loss
+                    training_stats.report('Loss/loss', loss)
+                    training_stats.report('Loss/loss_test', test_loss)
+                    training_stats.report('Loss/loss_train', train_loss)
                 else:
                     raise ValueError(f"Invalid dataset iterator length: {len(dataset_iter)}")
-                images = images.to(device).to(torch.float32)
-                labels = labels.to(device)
-
-                train_loss, val_loss, test_loss = loss_fn(net=ddp, images=images, labels=labels, augment_pipe=augment_pipe, 
-                    corruption_matrix=corruption_matrix, hat_corruption_matrix=hat_corruption_matrix, maps=maps)
-                loss = val_loss
                 
-                training_stats.report('Loss/loss', loss)
-                training_stats.report('Loss/loss_test', test_loss)
-                training_stats.report('Loss/loss_train', train_loss)
-
                 scalar_loss = loss.sum().mul(loss_scaling / batch_gpu_total)
                 if initial_loss is None:
                     initial_loss = scalar_loss.item()

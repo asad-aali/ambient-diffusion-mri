@@ -71,6 +71,7 @@ class EDMLoss:
         self.sigma_data = sigma_data
 
     def __call__(self, net, images, labels=None, augment_pipe=None, **kwargs):
+        images = images[:,:,:,32:352]
         rnd_normal = torch.randn([images.shape[0], 1, 1, 1], device=images.device)
         sigma = (rnd_normal * self.P_std + self.P_mean).exp()
         weight = (sigma ** 2 + self.sigma_data ** 2) / (sigma * self.sigma_data) ** 2
@@ -114,7 +115,7 @@ class AmbientLoss:
         img_out = torch.sum(torch.conj(maps)*coil_imgs,dim=1)[:,None,...] #sum over coil dimension
         return img_out
 
-    def __call__(self, net, images, corruption_matrix, hat_corruption_matrix, maps, labels=None, augment_pipe=None):        
+    def __call__(self, net, images, corruption_matrix, hat_corruption_matrix, maps=None, labels=None, augment_pipe=None):        
         images = images[:,:,:,32:352]
         rnd_normal = torch.randn([images.shape[0], 1, 1, 1], device=images.device)
         sigma = (rnd_normal * self.P_std + self.P_mean).exp()

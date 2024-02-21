@@ -41,6 +41,7 @@ class Dataset(torch.utils.data.Dataset):
         corruption_pattern = "dust",
         ratios = [1.0, 0.8, 0.6, 0.4, 0.2, 0.1],  # potential downsampling ratios,
         normalize=True,
+        precond=None
     ):
         assert corruption_pattern in ["dust", "box", "fixed_box", "keep_patch"], \
             "corruption_pattern must be either 'dust', 'box', 'keep_patch', or 'fixed_box'"
@@ -57,6 +58,7 @@ class Dataset(torch.utils.data.Dataset):
         self.corruption_pattern = corruption_pattern
         self.ratios = ratios
         self.normalize = normalize
+        self.precond = precond
 
         # Apply max_size.
         self._raw_idx = np.arange(self._raw_shape[0], dtype=np.int64)
@@ -121,53 +123,22 @@ class Dataset(torch.utils.data.Dataset):
                 self._cached_images[raw_idx] = image
         assert isinstance(image, np.ndarray)
         assert list(image.shape) == self.image_shape
-        # assert image.dtype == np.uint8
         if self._xflip[idx]:
             assert image.ndim == 3 # CHW
             image = image[:, :, ::-1]
         
-        maps_orig, mask, mask_delta = self._load_fwd(raw_idx)
-        corruption_mask = np.float32(mask[None])
-        hat_corruption_mask = np.float32(mask_delta[None])
-        maps = np.zeros((4, 384, 320), dtype=np.complex64)
-        maps[0:4] = self.fftmod(maps_orig)
-
-        # get array that masks each pixel with probability self.corruption_probability with fixed seed for reproducibility
         np.random.seed(raw_idx)
         torch.manual_seed(raw_idx)
-        # if self.normalize:
-        #     image = image.astype(np.float32) / 127.5 - 1
-        # if self.corruption_pattern == "dust":
-        #     if self.mask_full_rgb:
-        #         corruption_mask = np.random.binomial(1, 1 - self.corruption_probability, size=image.shape[1:]).astype(np.float32)
-        #         corruption_mask = corruption_mask[np.newaxis, :, :].repeat(image.shape[0], axis=0)
-        #         extra_mask = np.random.binomial(1, 1 - self.delta_probability, size=image.shape[1:]).astype(np.float32)
-        #         extra_mask = extra_mask[np.newaxis, :, :].repeat(image.shape[0], axis=0)
-        #         hat_corruption_mask = np.minimum(corruption_mask, extra_mask)
-        #     else:
-        #         corruption_mask = np.random.binomial(1, 1 - self.corruption_probability, size=image.shape).astype(np.float32)
-        #         hat_corruption_mask = np.minimum(corruption_mask, np.random.binomial(1, 1 - self.delta_probability, size=image.shape).astype(np.float32))
-        # elif self.corruption_pattern == "box":
-        #     corruption_mask = get_box_mask((1,) + image.shape, 1 - self.corruption_probability, same_for_all_batch=False, device='cpu')[0]
-        #     hat_corruption_mask = get_box_mask((1,) + image.shape, 1 - self.corruption_probability, same_for_all_batch=False, device='cpu')[0]
-        #     hat_corruption_mask = corruption_mask * hat_corruption_mask
-        # elif self.corruption_pattern == "fixed_box":
-        #     patch_size = int((self.corruption_probability) * image.shape[-2])
-        #     corruption_mask = 1 - get_patch_mask((1,) + image.shape, patch_size, same_for_all_batch=False, device='cpu')[0]
-        #     if self.delta_probability > 0:
-        #         hat_corruption_mask = 1 - get_patch_mask((1,) + image.shape, patch_size, same_for_all_batch=False, device='cpu')[0]
-        #         hat_corruption_mask = corruption_mask * hat_corruption_mask
-        #     else:
-        #         hat_corruption_mask = corruption_mask
-        # elif self.corruption_pattern == "keep_patch":
-        #     patch_size = int((1 - self.corruption_probability) * image.shape[-2])
-        #     corruption_mask = get_patch_mask((1,) + image.shape, patch_size, same_for_all_batch=False, device='cpu')
-        #     hat_patch_size =  int((1 - self.delta_probability) * patch_size)
-        #     hat_corruption_mask = get_hat_patch_mask(corruption_mask, patch_size, hat_patch_size, same_for_all_batch=False, device='cpu')[0]
-        #     corruption_mask = corruption_mask[0]
-        # else:
-        #     raise NotImplementedError("Corruption pattern not implemented")
-        return image.copy(), self.get_label(idx), corruption_mask, hat_corruption_mask, maps
+
+        if self.precond == "ambient":
+            maps_orig, mask, mask_delta = self._load_fwd(raw_idx)
+            corruption_mask = np.float32(mask[None])
+            hat_corruption_mask = np.float32(mask_delta[None])
+            maps = np.zeros((4, maps_orig.shape[-2], maps_orig.shape[-1]), dtype=np.complex64)
+            maps[0:4] = self.fftmod(maps_orig)
+            return image.copy(), self.get_label(idx), corruption_mask, hat_corruption_mask, maps
+        else:
+            return image.copy(), self.get_label(idx)
 
     def get_label(self, idx):
         label = self._get_raw_labels()[self._raw_idx[idx]]
@@ -388,7 +359,7 @@ class NumpyFolderDataset(Dataset):
         fname = self._image_fnames[raw_idx]
         with self._open_file(fname) as f:
             image = np.load(f)
-        image = sp.resize(image, (2, 384, 384))
+        image = sp.resize(image, (2, image.shape[1], image.shape[1]))
         return image
     
     #NOTE changed this to work with npy files

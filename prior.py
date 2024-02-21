@@ -21,6 +21,7 @@ import json
 from collections import OrderedDict
 import warnings
 import matplotlib.pyplot as plt
+import sigpy as sp
 import zipfile
 
 def cdist_masked(x1, x2, mask1=None, mask2=None):
@@ -61,6 +62,40 @@ def adjoint(ksp, maps, mask):
 
     return img_out
 
+def create_masks(R, delta_R, acs_lines, LENGTH_Y, LENGTH_X):
+    if delta_R == 3:
+        delta_R=54
+    elif delta_R == 5:
+        delta_R=16
+    elif delta_R == 7:
+        delta_R=8
+    elif delta_R == 9:
+        delta_R=5
+
+    total_lines = LENGTH_X
+    num_sampled_lines = np.floor(total_lines / R)
+    center_line_idx = np.arange((total_lines - acs_lines) // 2,(total_lines + acs_lines) // 2)
+    outer_line_idx = np.setdiff1d(np.arange(total_lines), center_line_idx)
+    random_line_idx = np.random.choice(outer_line_idx,size=int(num_sampled_lines - acs_lines), replace=False)
+    mask = np.zeros((total_lines, total_lines))
+    mask[:,center_line_idx] = 1.
+    mask[:,random_line_idx] = 1.
+    
+    random.shuffle(random_line_idx)
+    further_mask = mask.copy()
+    further_mask[:, random_line_idx[0:delta_R]] = 0.
+
+    mask = sp.resize(mask, [LENGTH_Y, LENGTH_X])
+    further_mask = sp.resize(further_mask, [LENGTH_Y, LENGTH_X])
+    diff_dim = LENGTH_Y - LENGTH_X
+    half_dim = int(diff_dim / 2)
+    mask[0:half_dim] = mask[half_dim:diff_dim]
+    mask[LENGTH_Y-half_dim:LENGTH_Y] = mask[half_dim:diff_dim]
+    further_mask[0:half_dim] = further_mask[half_dim:diff_dim]
+    further_mask[LENGTH_Y-half_dim:LENGTH_Y] = further_mask[half_dim:diff_dim]
+
+    return torch.tensor(further_mask)
+
 def ambient_sampler(
     net, latents, class_labels=None, randn_like=torch.randn_like,
     num_steps=18, sigma_min=0.002, sigma_max=80, rho=7,
@@ -73,42 +108,37 @@ def ambient_sampler(
     clipping=True,
     static=False,  # whether to use soft clipping or static clipping
     resample_guidance_masks=False,
+    experiment_name=None,
+    maps_path=None
 ):
     # Adjust noise levels based on what's supported by the network.
     sigma_min = max(sigma_min, net.sigma_min)
     sigma_max = min(sigma_max, net.sigma_max)
 
+    latents = latents[:,:,:,0:320]
+    corr = int(experiment_name[-1])
+    delta_corr = corr + 1
+    
+    file = zipfile.ZipFile(maps_path, 'r')
+    masks = torch.ones_like(latents).cuda()
+    maps = torch.zeros([latents.shape[0], 4, latents.shape[-2], latents.shape[-1]], dtype=torch.complex64).cuda()
+
+    for i in range(latents.shape[0]):
+        with file.open(str(i) + "/maps.npy", 'r') as f:
+            map = np.load(f)
+            map = fftmod(map)
+            map = torch.tensor(map, dtype=torch.complex64).to(latents.device)
+            maps[i] = map
+        mask_delta = create_masks(corr, delta_corr, 20, latents.shape[-2], latents.shape[-1])
+        masks[i,0] = torch.tensor(mask_delta)
+
     clean_image = None
 
-    def sample_masks():
-        masks = []
-        for _ in range(num_masks):
-            survival_probability=0.54
-            masks.append(get_random_mask(latents.shape, survival_probability, mask_full_rgb=mask_full_rgb, 
-                                                same_for_all_batch=same_for_all_batch, device=latents.device))
-        masks = torch.stack(masks)
-        return masks
-    
-    latents = latents[:,:,:,0:320]
-    masks = sample_masks()
-    masks = torch.ones_like(masks).cuda()
-    file = zipfile.ZipFile("/home/asad/ambient-diffusion-mri/data/fastMRI/numpy/ksp_brainMRI_384.zip")
-
-    corr = 4
-    slice  = 0
-    
-    with file.open(str(slice) + "/maps.npy", 'r') as f:
-        map = np.load(f)
-
-    map = fftmod(map)
-    map = torch.tensor(map, dtype=torch.complex64).to(latents.device)
-    maps = torch.zeros([masks.shape[1], map.shape[0], map.shape[1], map.shape[2]], dtype=torch.complex64).cuda()
-
-    for i in range(masks.shape[1]):
-        with file.open(str(i) + "/mask_delta_" + str(corr+1) + ".npy", 'r') as f:
-            mask_delta = np.load(f)
-        masks[:,i,0] = torch.tensor(mask_delta)
-        maps[i] = map
+    print('Maps Shape: ' + str(maps.shape) + '\n')
+    print('Masks Shape: ' + str(masks.shape) + '\n')
+    print('Image Shape: ' + str(latents.shape) + '\n')
+    print("Mask R=" + str(delta_corr) + ": " + str(float((latents.shape[-2]*latents.shape[-1])/torch.sum(mask_delta))))
+    masks = masks[None].cuda()
 
     # Time step discretization.
     step_indices = torch.arange(num_steps, dtype=torch.float64, device=latents.device)
@@ -137,12 +167,11 @@ def ambient_sampler(
             masked_x_hat = adjoint(forward(x_hat_cplx, maps, corruption_mask[:,0][:,None]), maps, corruption_mask[:,0][:,None])
             masked_x_hat = torch.cat((masked_x_hat.real, masked_x_hat.imag), dim=1)
 
-            # masked_image = corruption_mask * x_hat
             noisy_image = masked_x_hat
 
             net_input = torch.cat([noisy_image, corruption_mask], dim=1)
             net_output = net(net_input, t_hat, class_labels).to(torch.float64)[:, :int(net.img_channels/2)]
-            # print_tensor_stats(net_output, 'Denoised')
+
             if clipping:
                 net_output = tensor_clipping(net_output, static=static)
 
@@ -210,12 +239,14 @@ def ambient_sampler(
 @click.command()
 @click.option('--with_wandb', help='Whether to report to wandb', metavar='BOOL', type=bool, default=True, show_default=True)
 @click.option('--network', 'network_loc',  help='Location of the folder where the network is stored', metavar='PATH|URL',                      type=str, required=True)
+@click.option('--maps_path',  help='Location of the folder where the maps are stored', metavar='PATH|URL',                      type=str, required=True)
 @click.option('--training_options_loc', help='Location of the training options file', metavar='PATH|URL', type=str, required=True)
 @click.option('--outdir',                  help='Where to save the output images', metavar='DIR',                   type=str, required=True)
-@click.option('--seeds',                   help='Random seeds (e.g. 1,2,5-10)', metavar='LIST',                     type=parse_int_list, default='0-63', show_default=True)
+@click.option('--seeds',                   help='Random seeds', metavar='INT',                      type=int, default='0', show_default=True)
 @click.option('--subdirs',                 help='Create subdirectory for every 1000 seeds',                         is_flag=True)
 @click.option('--class', 'class_idx',      help='Class label  [default: random]', metavar='INT',                    type=click.IntRange(min=0), default=None)
 @click.option('--batch', 'max_batch_size', help='Maximum batch size', metavar='INT',                                type=click.IntRange(min=1), default=64, show_default=True)
+@click.option('--gpu',                     help='GPU Machine', metavar='INT',                                       type=int, default=0, show_default=True)
 
 @click.option('--img_channels', help='Channels for image', metavar='INT', type=int, default=3, show_default=True)
 @click.option('--corruption_probability', help='Probability of corruption', metavar='FLOAT', type=float, default=0.4, show_default=True)
@@ -260,14 +291,17 @@ def main(with_wandb, network_loc, training_options_loc, outdir, subdirs, seeds, 
          img_channels, corruption_probability, delta_probability,
          num_masks, guidance_scale, mask_full_rgb,
          # other params
-         experiment_name, wandb_id, ref_path, num_expected, seed, eval_step, skip_generation,
-         skip_calculation, num_classes,
+         experiment_name, wandb_id, ref_path, num_expected, seed, eval_step, skip_generation, gpu,
+         skip_calculation, num_classes, maps_path,
          device=torch.device('cuda'),  **sampler_kwargs):
     torch.multiprocessing.set_start_method('spawn')
+    os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu)
     dist.init()
-    survival_probability = (1 - corruption_probability) * (1 - delta_probability)
+
     # we want to make sure that each gpu does not get more than batch size.
     # Hence, the following measures how many batches are going to be per GPU.
+    seeds = range(seeds)
     seeds = seeds[:num_expected]
     num_batches = ((len(seeds) - 1) // (max_batch_size * dist.get_world_size()) + 1) * dist.get_world_size()
     
@@ -311,23 +345,17 @@ def main(with_wandb, network_loc, training_options_loc, outdir, subdirs, seeds, 
             # Sort the list of "*.pkl" files
             sorted_pkl_files = sorted(pkl_files)[eval_index:]
 
-
-            checkpoint_numbers = []
-            for curr_file in sorted_pkl_files:
-                checkpoint_numbers.append(int(curr_file.split('-')[-1].split('.')[0]))
-            checkpoint_numbers = np.array(checkpoint_numbers)
-
             if len(sorted_pkl_files) == 0:
                 dist.print0("No new checkpoint found! Going to sleep for 1min!")
                 time.sleep(60)
                 dist.print0("Woke up!")
             
-            for checkpoint_number, checkpoint in zip(checkpoint_numbers, sorted_pkl_files):
+            for checkpoint_number in zip(sorted_pkl_files):
                 # Rank 0 goes first.
                 if dist.get_rank() != 0:
                     torch.distributed.barrier()
 
-                network_pkl = os.path.join(network_loc, f'network-snapshot-{checkpoint_number:06d}.pkl')
+                network_pkl = os.path.join(network_loc, f'network-snapshot.pkl')
                 # Load network.
                 dist.print0(f'Loading network from "{network_pkl}"...')
                 with dnnlib.util.open_url(network_pkl, verbose=(dist.get_rank() == 0)) as f:
@@ -377,9 +405,8 @@ def main(with_wandb, network_loc, training_options_loc, outdir, subdirs, seeds, 
                     # Generate images.
                     sampler_kwargs = {key: value for key, value in sampler_kwargs.items() if value is not None}
                     images = ambient_sampler(net, latents, class_labels, randn_like=rnd.randn_like, sampler_seed=batch_seeds, 
-                        survival_probability=survival_probability, 
-                        num_masks=num_masks, guidance_scale=guidance_scale, 
-                        mask_full_rgb=mask_full_rgb, **sampler_kwargs)
+                        num_masks=num_masks, guidance_scale=guidance_scale, maps_path=maps_path,
+                        mask_full_rgb=mask_full_rgb, experiment_name=experiment_name, **sampler_kwargs)
 
                     curr_seed = batch_seeds[0]
                     image_dir = os.path.join(outdir, str(checkpoint_number), 
@@ -419,171 +446,5 @@ def main(with_wandb, network_loc, training_options_loc, outdir, subdirs, seeds, 
                 torch.distributed.barrier()
             dist.print0("Everyone finished.. Starting calculation..")
 
-            if not skip_calculation:
-                calc(os.path.join(outdir, str(checkpoint_number)), ref_path, num_expected, seed, max_batch_size, with_wandb=with_wandb)
-            torch.distributed.barrier() 
-            eval_index += eval_step
-            dist.print0('Done.')
-    else:
-        calc(network_loc, ref_path, num_expected, seed, max_batch_size, with_wandb=with_wandb)
-
-
-#----------------------------------------------------------------------------
-
-
-def calculate_inception_stats(
-    image_path, num_expected=None, seed=0, max_batch_size=64,
-    num_workers=3, prefetch_factor=2, device=torch.device('cuda'),
-):
-
-    # Load Inception-v3 model.
-    # This is a direct PyTorch translation of http://download.tensorflow.org/models/image/imagenet/inception-2015-12-05.tgz
-    dist.print0('Loading Inception-v3 model...')
-    detector_url = 'https://api.ngc.nvidia.com/v2/models/nvidia/research/stylegan3/versions/1/files/metrics/inception-2015-12-05.pkl'
-    detector_kwargs = dict(return_features=True)
-    inception_kwargs = dict(no_output_bias=True) # Match the original implementation by not applying bias in the softmax layer.
-    feature_dim = 2048
-    with dnnlib.util.open_url(detector_url, verbose=(dist.get_rank() == 0)) as f:
-        detector_net = pickle.load(f).to(device)
-
-    # List images.
-    dist.print0(f'Loading images from "{image_path}"...')
-    dataset_obj = dataset.ImageFolderDataset(path=image_path, max_size=num_expected, random_seed=seed, normalize=False)
-
-    if num_expected is not None and len(dataset_obj) < num_expected:
-        raise click.ClickException(f'Found {len(dataset_obj)} images, but expected at least {num_expected}')
-    if len(dataset_obj) < 2:
-        raise click.ClickException(f'Found {len(dataset_obj)} images, but need at least 2 to compute statistics')
-
-    # Other ranks follow.
-    if dist.get_rank() == 0:
-        torch.distributed.barrier()
-
-    # Divide images into batches.
-    num_batches = ((len(dataset_obj) - 1) // (max_batch_size * dist.get_world_size()) + 1) * dist.get_world_size()
-    all_batches = torch.arange(len(dataset_obj)).tensor_split(num_batches)
-    rank_batches = all_batches[dist.get_rank() :: dist.get_world_size()]
-    
-    data_loader = torch.utils.data.DataLoader(dataset_obj, batch_sampler=rank_batches, num_workers=0)
-    iter_loader = iter(data_loader)
-
-
-    # Accumulate statistics.
-    dist.print0(f'Calculating statistics for {len(dataset_obj)} images...')
-    mu = torch.zeros([feature_dim], dtype=torch.float64, device=device)
-    sigma = torch.zeros([feature_dim, feature_dim], dtype=torch.float64, device=device)
-
-    all_features = []
-
-    for _ in tqdm.tqdm(range(len(rank_batches))):
-        images, _labels, _, _ = next(iter_loader)
-
-        torch.distributed.barrier()
-        if images.shape[0] == 0:
-            break
-        if images.shape[1] == 1:
-            images = images.repeat([1, 3, 1, 1])
-
-        # fid 
-        features = detector_net(images.to(device), **detector_kwargs).to(torch.float64)
-        mu += features.sum(0)
-        sigma += features.T @ features
-
-        # inception
-        inception_features = torch.clamp(detector_net(images.to(device), **inception_kwargs), min=1e-6, max=1.0)
-        all_features.append(inception_features.to(torch.float64))
-
-
-    all_features = torch.cat(all_features, dim=0).reshape(-1, inception_features.shape[-1]).to(torch.float64)
-    dist.print0("Features computed locally.")
-    dist.print0("Wait for all others to finish before gathering...")
-    torch.distributed.barrier()
-    dist.print0("Gathering process started...")
-
-    all_features_list = [torch.ones_like(all_features) for _ in range(dist.get_world_size())]
-    torch.distributed.all_gather(all_features_list, all_features)
-    all_features_gathered = torch.cat(all_features_list, dim=0)
-    
-    gen_probs = all_features_gathered.reshape(-1, all_features.shape[-1]).cpu().numpy()
-    dist.print0(f"{gen_probs.shape}, {gen_probs.min()}, {gen_probs.max()}")
-    dist.print0("Computing KL...")
-    kl = gen_probs * (np.log(gen_probs) - np.log(np.mean(gen_probs, axis=0, keepdims=True)))
-    kl = np.mean(np.sum(kl, axis=1))
-    dist.print0("KL computed...")
-    inception_score = np.mean(np.exp(kl))
-    dist.print0(f"Inception score: {inception_score}")
-
-
-    # Calculate grand totals.
-    torch.distributed.all_reduce(mu)
-    torch.distributed.all_reduce(sigma)
-    mu /= len(dataset_obj)
-    sigma -= mu.ger(mu) * len(dataset_obj)
-    sigma /= len(dataset_obj) - 1
-
-
-
-    return mu.cpu().numpy(), sigma.cpu().numpy(), inception_score
-
-#----------------------------------------------------------------------------
-
-def calculate_fid_from_inception_stats(mu, sigma, mu_ref, sigma_ref):
-    m = np.square(mu - mu_ref).sum()
-    s, _ = scipy.linalg.sqrtm(np.dot(sigma, sigma_ref), disp=False)
-    fid = m + np.trace(sigma + sigma_ref - s * 2)
-    return float(np.real(fid))
-
-    
-
-def calc(image_path, ref_path, num_expected, seed, batch, num_rows=8, num_cols=8, image_size=32, with_wandb=True):
-    """Calculate Inception/FID for a given set of images."""
-    assert num_rows * num_cols <= num_expected, "You need to save more images."
-    dist.print0("Starting FID calculation...")
-    dist.print0(f'Loading dataset reference statistics from "{ref_path}"...')
-    ref = None
-    if dist.get_rank() == 0:
-        with dnnlib.util.open_url(ref_path) as f:
-            ref = dict(np.load(f))
-    
-    try:
-        checkpoint_index = int(image_path.split('/')[-1])
-    except:
-        checkpoint_index = 0
-        # raise warning that we could not find the checkpoint
-        warnings.warn("Could not find the checkpoint")
-
-    if dist.get_rank() == 0:
-        dist.print0("Creating image collage...")
-        try:
-            grid_image = None
-            for i in range(num_rows):
-                for j in range(num_cols):
-                    index = i * num_cols + j
-                    sample_image_path = os.path.join(image_path, f"{index:06d}.png")
-                    img_array = np.array(PIL.Image.open(sample_image_path))
-                    img = PIL.Image.fromarray(img_array)
-                    if grid_image is None:
-                        image_size = img_array.shape[-2]
-                        # create a blank image to hold the grid
-                        grid_image = PIL.Image.new('RGB', (num_cols * image_size, num_rows * image_size))
-                    grid_image.paste(img, (i * image_size, j * image_size))
-        except:
-            warnings.warn(f"Could not create image collage from images in {image_path}.")
-
-        dist.print0("Finished collage creation")
-    
-    mu, sigma, inception = calculate_inception_stats(image_path=image_path, num_expected=num_expected, seed=seed, max_batch_size=batch)
-    dist.print0(f'Calculating FID for {image_path}...')
-    if dist.get_rank() == 0:
-        fid = calculate_fid_from_inception_stats(mu, sigma, ref['mu'], ref['sigma'])
-        dist.print0(f"FID: {fid:g}")
-
-    torch.distributed.barrier()
-    if dist.get_rank() == 0 and with_wandb:
-        wandb.log({"FID": fid, "Inception": inception, "image_grid": wandb.Image(grid_image)}, step=checkpoint_index, commit=True)
-    dist.print0("Computed FID and logged it.")
-
 if __name__ == "__main__":
     main()
-
-#----------------------------------------------------------------------------

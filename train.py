@@ -84,6 +84,7 @@ def parse_int_list(s):
 @click.option('--bench',         help='Enable cuDNN benchmarking', metavar='BOOL',                  type=bool, default=True, show_default=True)
 @click.option('--cache',         help='Cache dataset in CPU memory', metavar='BOOL',                type=bool, default=True, show_default=True)
 @click.option('--workers',       help='DataLoader worker processes', metavar='INT',                 type=click.IntRange(min=1), default=1, show_default=True)
+@click.option('--gpu',           help='GPU Machine', metavar='INT',                                 type=int, default=0, show_default=True)
 
 # I/O-related.
 @click.option('--desc',          help='String to include in result dir name', metavar='STR',        type=str)
@@ -103,6 +104,8 @@ def parse_int_list(s):
 def main(**kwargs):
     opts = dnnlib.EasyDict(kwargs)
     torch.multiprocessing.set_start_method('spawn')
+    os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(opts.gpu)
     dist.init()
 
     if dist.get_rank() == 0:
@@ -111,10 +114,7 @@ def main(**kwargs):
             config=kwargs,
             name=opts.experiment_name,
             id=opts.wandb_id
-            # resume="must" if (opts.resume is not None and opts.wandb_id) else False
         )
-
-
 
     # Initialize config dict.
     c = dnnlib.EasyDict()
@@ -122,7 +122,7 @@ def main(**kwargs):
     if "numpy" in opts.data:
         c.dataset_kwargs = dnnlib.EasyDict(class_name='training.dataset.NumpyFolderDataset', path=opts.data, use_labels=opts.cond, xflip=opts.xflip, cache=opts.cache, 
                                        corruption_probability=opts.corruption_probability, delta_probability=opts.delta_probability, mask_full_rgb=opts.mask_full_rgb,
-                                       corruption_pattern=opts.corruption_pattern, normalize=opts.normalize)
+                                       corruption_pattern=opts.corruption_pattern, normalize=opts.normalize, precond=opts.precond)
     else:
         c.dataset_kwargs = dnnlib.EasyDict(class_name='training.dataset.ImageFolderDataset', path=opts.data, use_labels=opts.cond, xflip=opts.xflip, cache=opts.cache, 
                                        corruption_probability=opts.corruption_probability, delta_probability=opts.delta_probability, mask_full_rgb=opts.mask_full_rgb,
