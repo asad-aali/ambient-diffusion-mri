@@ -1,26 +1,17 @@
 import os
-import re
 import click
 import tqdm
 import pickle
-import numpy as np
 import torch
-import PIL.Image
 import dnnlib
 from torch_utils import distributed as dist
-from training import dataset
-import scipy.linalg
 import wandb
 from torch_utils.misc import parse_int_list
 from torch_utils.misc import StackedRandomGenerator
 import time
 import json
 from collections import OrderedDict
-import warnings
-from training.dataset import ImageFolderDataset
-from torch_utils import misc
 import matplotlib.pyplot as plt
-import sys
 
 def fftmod(x):
     x[...,::2,:] *= -1
@@ -65,10 +56,11 @@ def ambient_sampler(
     contents = torch.load(measurements_path)
 
     print('\nForwardFastMRI Dataloader:\n')
+    ksp      = fftmod(contents['ksp'])[None].cuda() # shape: [1,C,H,W]
     maps     = fftmod(contents['s_map'])[None].cuda() # shape: [1,C,H,W]
     mask     = contents['mask_' + str(experiment_name[-1])][None].cuda() # shape: [1,1,H,W]
     gt_img   = contents['gt'][None,None].cuda() # shape [1,1,H,W]
-    ksp      = forward(gt_img, maps, mask)
+    ksp      = ksp * mask 
     latents  = latents[:,:, 0:ksp.shape[2], 0:ksp.shape[3]]
 
     print('Ksp Shape: ' + str(ksp.shape) + '\n')
@@ -95,7 +87,6 @@ def ambient_sampler(
     nrmse = torch.linalg.norm(net_output_cplx - gt_img) / torch.linalg.norm(gt_img)
     print('\n\nNRMSE: ' + str(float(nrmse)))
     return net_output, ksp, gt_img
-
 
 @click.command()
 @click.option('--with_wandb', help='Whether to report to wandb', metavar='BOOL', type=bool, default=True, show_default=True)
@@ -179,8 +170,9 @@ def main(with_wandb, network_loc, training_options_loc, outdir, subdirs, seeds, 
          measurements_path, gpu,
          device=torch.device('cuda'),  **sampler_kwargs):
     torch.multiprocessing.set_start_method('spawn')
-    os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-    os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu)
+    if gpu != 0:
+        os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+        os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu)
     dist.init()
     # we want to make sure that each gpu does not get more than batch size.
     # Hence, the following measures how many batches are going to be per GPU.

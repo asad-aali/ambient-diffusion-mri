@@ -12,16 +12,12 @@ from torch_utils import distributed as dist
 from training import dataset
 import scipy.linalg
 import wandb
-from torch_utils.ambient_diffusion import get_random_mask
-from torch_utils.misc import parse_int_list
+from torch_utils.ambient_diffusion import create_masks
 from torch_utils.misc import StackedRandomGenerator
 import time
-import random
 import json
 from collections import OrderedDict
-import warnings
 import matplotlib.pyplot as plt
-import sigpy as sp
 import zipfile
 
 def cdist_masked(x1, x2, mask1=None, mask2=None):
@@ -62,40 +58,6 @@ def adjoint(ksp, maps, mask):
 
     return img_out
 
-def create_masks(R, delta_R, acs_lines, LENGTH_Y, LENGTH_X):
-    if delta_R == 3:
-        delta_R=54
-    elif delta_R == 5:
-        delta_R=16
-    elif delta_R == 7:
-        delta_R=8
-    elif delta_R == 9:
-        delta_R=5
-
-    total_lines = LENGTH_X
-    num_sampled_lines = np.floor(total_lines / R)
-    center_line_idx = np.arange((total_lines - acs_lines) // 2,(total_lines + acs_lines) // 2)
-    outer_line_idx = np.setdiff1d(np.arange(total_lines), center_line_idx)
-    random_line_idx = np.random.choice(outer_line_idx,size=int(num_sampled_lines - acs_lines), replace=False)
-    mask = np.zeros((total_lines, total_lines))
-    mask[:,center_line_idx] = 1.
-    mask[:,random_line_idx] = 1.
-    
-    random.shuffle(random_line_idx)
-    further_mask = mask.copy()
-    further_mask[:, random_line_idx[0:delta_R]] = 0.
-
-    mask = sp.resize(mask, [LENGTH_Y, LENGTH_X])
-    further_mask = sp.resize(further_mask, [LENGTH_Y, LENGTH_X])
-    diff_dim = LENGTH_Y - LENGTH_X
-    half_dim = int(diff_dim / 2)
-    mask[0:half_dim] = mask[half_dim:diff_dim]
-    mask[LENGTH_Y-half_dim:LENGTH_Y] = mask[half_dim:diff_dim]
-    further_mask[0:half_dim] = further_mask[half_dim:diff_dim]
-    further_mask[LENGTH_Y-half_dim:LENGTH_Y] = further_mask[half_dim:diff_dim]
-
-    return torch.tensor(further_mask)
-
 def ambient_sampler(
     net, latents, class_labels=None, randn_like=torch.randn_like,
     num_steps=18, sigma_min=0.002, sigma_max=80, rho=7,
@@ -117,27 +79,22 @@ def ambient_sampler(
 
     latents = latents[:,:,:,0:320]
     corr = int(experiment_name[-1])
-    delta_corr = corr + 1
     
     file = zipfile.ZipFile(maps_path, 'r')
     masks = torch.ones_like(latents).cuda()
     maps = torch.zeros([latents.shape[0], 4, latents.shape[-2], latents.shape[-1]], dtype=torch.complex64).cuda()
-
-    for i in range(latents.shape[0]):
-        with file.open(str(i) + "/maps.npy", 'r') as f:
-            map = np.load(f)
-            map = fftmod(map)
-            map = torch.tensor(map, dtype=torch.complex64).to(latents.device)
-            maps[i] = map
-        mask_delta = create_masks(corr, delta_corr, 20, latents.shape[-2], latents.shape[-1])
-        masks[i,0] = torch.tensor(mask_delta)
+    delta_corr = corr
+    if corr > 1:
+        delta_corr = corr + 1
+        for i in range(latents.shape[0]):
+            with file.open(str(i) + "/maps.npy", 'r') as f:
+                map = np.load(f)
+                map = fftmod(map)
+                map = torch.tensor(map, dtype=torch.complex64).to(latents.device)
+                maps[i] = map
+            masks[i,0] = create_masks(corr, delta_corr, 20, latents.shape[-2], latents.shape[-1])
 
     clean_image = None
-
-    print('Maps Shape: ' + str(maps.shape) + '\n')
-    print('Masks Shape: ' + str(masks.shape) + '\n')
-    print('Image Shape: ' + str(latents.shape) + '\n')
-    print("Mask R=" + str(delta_corr) + ": " + str(float((latents.shape[-2]*latents.shape[-1])/torch.sum(mask_delta))))
     masks = masks[None].cuda()
 
     # Time step discretization.
@@ -161,16 +118,18 @@ def ambient_sampler(
 
         denoised = []
         for mask_index in range(num_masks):
-            corruption_mask = masks[mask_index]
-            x_hat_cplx = x_hat[:,0] + 1j*x_hat[:,1]
-            x_hat_cplx = x_hat_cplx[:,None,...]
-            masked_x_hat = adjoint(forward(x_hat_cplx, maps, corruption_mask[:,0][:,None]), maps, corruption_mask[:,0][:,None])
-            masked_x_hat = torch.cat((masked_x_hat.real, masked_x_hat.imag), dim=1)
+            if corr > 1:
+                corruption_mask = masks[mask_index]
+                x_hat_cplx = x_hat[:,0] + 1j*x_hat[:,1]
+                x_hat_cplx = x_hat_cplx[:,None,...]
+                masked_x_hat = adjoint(forward(x_hat_cplx, maps, corruption_mask[:,0][:,None]), maps, corruption_mask[:,0][:,None])
+                masked_x_hat = torch.cat((masked_x_hat.real, masked_x_hat.imag), dim=1)
+                noisy_image = masked_x_hat
 
-            noisy_image = masked_x_hat
-
-            net_input = torch.cat([noisy_image, corruption_mask], dim=1)
-            net_output = net(net_input, t_hat, class_labels).to(torch.float64)[:, :int(net.img_channels/2)]
+                net_input = torch.cat([noisy_image, corruption_mask], dim=1)
+                net_output = net(net_input, t_hat, class_labels).to(torch.float64)[:, :int(net.img_channels/2)]
+            else:
+                net_output = net(x_hat, t_hat, class_labels).to(torch.float64)
 
             if clipping:
                 net_output = tensor_clipping(net_output, static=static)
@@ -200,17 +159,18 @@ def ambient_sampler(
 
             denoised = []
             for mask_index in range(num_masks):
-                corruption_mask = masks[mask_index]
+                if corr > 1:
+                    corruption_mask = masks[mask_index]
+                    x_next_cplx = x_next[:,0] + 1j*x_next[:,1]
+                    x_next_cplx = x_next_cplx[:,None,...]
+                    masked_image = adjoint(forward(x_next_cplx, maps, corruption_mask[:,0][:,None]), maps, corruption_mask[:,0][:,None])
+                    masked_image = torch.cat((masked_image.real, masked_image.imag), dim=1)
+                    noisy_image = masked_image
 
-                x_next_cplx = x_next[:,0] + 1j*x_next[:,1]
-                x_next_cplx = x_next_cplx[:,None,...]
-                masked_image = adjoint(forward(x_next_cplx, maps, corruption_mask[:,0][:,None]), maps, corruption_mask[:,0][:,None])
-                masked_image = torch.cat((masked_image.real, masked_image.imag), dim=1)
-                
-                # masked_image = corruption_mask * x_next
-                noisy_image = masked_image
-                net_input = torch.cat([noisy_image, corruption_mask], dim=1)
-                net_output = net(net_input, t_next, class_labels).to(torch.float64)[:, :int(net.img_channels/2)]
+                    net_input = torch.cat([noisy_image, corruption_mask], dim=1)
+                    net_output = net(net_input, t_next, class_labels).to(torch.float64)[:, :int(net.img_channels/2)]
+                else:
+                    net_output = net(x_next, t_next, class_labels).to(torch.float64)
                 if clipping:
                     net_output = tensor_clipping(net_output, static=static)
                 
@@ -295,8 +255,9 @@ def main(with_wandb, network_loc, training_options_loc, outdir, subdirs, seeds, 
          skip_calculation, num_classes, maps_path,
          device=torch.device('cuda'),  **sampler_kwargs):
     torch.multiprocessing.set_start_method('spawn')
-    os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-    os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu)
+    if gpu != 0:
+        os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+        os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu)
     dist.init()
 
     # we want to make sure that each gpu does not get more than batch size.
@@ -332,7 +293,11 @@ def main(with_wandb, network_loc, training_options_loc, outdir, subdirs, seeds, 
             label_dim = num_classes
         else:
             label_dim = 0
-        interface_kwargs = dict(img_resolution=training_options['dataset_kwargs']['resolution'], label_dim=label_dim, img_channels=img_channels*2)
+        corr = int(experiment_name[-1])
+        if corr == 1:
+            interface_kwargs = dict(img_resolution=training_options['dataset_kwargs']['resolution'], label_dim=label_dim, img_channels=img_channels)
+        else:
+            interface_kwargs = dict(img_resolution=training_options['dataset_kwargs']['resolution'], label_dim=label_dim, img_channels=img_channels*2)
         network_kwargs = training_options['network_kwargs']
         model_to_be_initialized = dnnlib.util.construct_class_by_name(**network_kwargs, **interface_kwargs) # subclass of torch.nn.Module
 
@@ -394,7 +359,10 @@ def main(with_wandb, network_loc, training_options_loc, outdir, subdirs, seeds, 
 
                     # Pick latents and labels.
                     rnd = StackedRandomGenerator(device, batch_seeds)
-                    latents = rnd.randn([batch_size, int(net.img_channels/2), net.img_resolution, net.img_resolution], device=device)
+                    if corr == 1:
+                        latents = rnd.randn([batch_size, net.img_channels, net.img_resolution, net.img_resolution], device=device)
+                    else:
+                        latents = rnd.randn([batch_size, int(net.img_channels/2), net.img_resolution, net.img_resolution], device=device)
                     class_labels = None
                     if net.label_dim:
                         class_labels = torch.eye(net.label_dim, device=device)[rnd.randint(net.label_dim, size=[batch_size], device=device)]

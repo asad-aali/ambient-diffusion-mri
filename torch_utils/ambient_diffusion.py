@@ -4,6 +4,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 import scipy
 from .motionblur import Kernel
+import random
+import numpy as np
+import sigpy as sp
 
 def average_missing_pixels():
     pass
@@ -337,3 +340,54 @@ def get_operator(corruption_pattern, corruption_probability=None, delta_probabil
         return AveragingForwardOperator(corruption_probability, downsampling_factor)
     else:
         raise ValueError("Unknown corruption pattern {}".format(corruption_pattern))         
+
+def psnr(gt, est, max_pixel): 
+    mse = np.mean((gt - est) ** 2) 
+    max_pixel = max_pixel
+    psnr = 20 * np.log10(max_pixel / np.sqrt(mse)) 
+    return psnr
+
+def nrmse_np(x,y):
+    num = np.linalg.norm(x-y)
+    denom = np.linalg.norm(x)
+    return num/denom
+
+def nrmse(x, y):
+    num = torch.norm(x-y, p=2)
+    denom = torch.norm(x,p=2)
+    return num/denom
+    return x
+
+def create_masks(R, delta_R, acs_lines, LENGTH_Y, LENGTH_X):
+    if delta_R == 3:
+        delta_R=54
+    elif delta_R == 5:
+        delta_R=16
+    elif delta_R == 7:
+        delta_R=8
+    elif delta_R == 9:
+        delta_R=5
+
+    total_lines = LENGTH_X
+    num_sampled_lines = np.floor(total_lines / R)
+    center_line_idx = np.arange((total_lines - acs_lines) // 2,(total_lines + acs_lines) // 2)
+    outer_line_idx = np.setdiff1d(np.arange(total_lines), center_line_idx)
+    random_line_idx = np.random.choice(outer_line_idx,size=int(num_sampled_lines - acs_lines), replace=False)
+    mask = np.zeros((total_lines, total_lines))
+    mask[:,center_line_idx] = 1.
+    mask[:,random_line_idx] = 1.
+    
+    random.shuffle(random_line_idx)
+    further_mask = mask.copy()
+    further_mask[:, random_line_idx[0:delta_R]] = 0.
+
+    mask = sp.resize(mask, [LENGTH_Y, LENGTH_X])
+    further_mask = sp.resize(further_mask, [LENGTH_Y, LENGTH_X])
+    diff_dim = LENGTH_Y - LENGTH_X
+    half_dim = int(diff_dim / 2)
+    mask[0:half_dim] = mask[half_dim:diff_dim]
+    mask[LENGTH_Y-half_dim:LENGTH_Y] = mask[half_dim:diff_dim]
+    further_mask[0:half_dim] = further_mask[half_dim:diff_dim]
+    further_mask[LENGTH_Y-half_dim:LENGTH_Y] = further_mask[half_dim:diff_dim]
+
+    return torch.tensor(further_mask)

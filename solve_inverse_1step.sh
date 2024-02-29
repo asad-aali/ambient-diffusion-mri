@@ -1,8 +1,8 @@
-R=4
-EXPERIMENT_NAME=brainMRI_posterior_R=$R
+R=2
+EXPERIMENT_NAME=brainMRI_1step_R=$R
 GPUS_PER_NODE=1
-GPU=3
-MODEL_PATH=/home/asad/ambient-diffusion-mri/models/brainMRI_ksp_384_$R
+GPU=1
+MODEL_PATH=/home/asad/ambient-diffusion-mri/models/brainMRI_R=$R
 MEAS_PATH=/csiNAS/asad/data/brain_fastMRI/val_samples_ambient
 SEEDS=100
 
