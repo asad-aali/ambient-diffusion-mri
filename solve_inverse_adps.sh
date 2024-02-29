@@ -13,7 +13,7 @@ do
         for sample in {0..100}
         do
             torchrun --standalone --nproc_per_node=$GPUS_PER_NODE \
-            solve_inverse.py --seed $seed --latent_seeds $seed --gpu $GPU \
+            solve_inverse_adps.py --seed $seed --latent_seeds $seed --gpu $GPU \
             --sample $sample --inference_R $R --training_R $TRAINING_R \
             --l_ss 1 --num_steps $STEPS --S_churn 0 \
             --measurements_path $MEAS_PATH --network $MODEL_PATH \
