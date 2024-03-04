@@ -1,19 +1,19 @@
 ## Ambient Diffusion Posterior Sampling: Solving Inverse Problems with Diffusion Models trained on Corrupted Data
 
-This repository hosts the official PyTorch implementation of the paper: [Ambient Diffusion Posterior Sampling: Solving Inverse Problems with Diffusion Models trained on Corrupted Data](https://arxiv.org/abs/2305.19256).
+This repository hosts the official PyTorch implementation of the paper: [Ambient Diffusion Posterior Sampling: Solving Inverse Problems with Diffusion Models trained on Corrupted Data]().
 
 
 Authored by: Asad Aali, Giannis Daras, Brett Levac, Sidharth Kumar, Alexandros G. Dimakis, Jonathan I. Tamir
 
 <center><img src="https://github.com/asad-aali/ambient-diffusion-mri/blob/main/docs/prior.png" width="512"></center>
 
-<u> Abstract </u>: *We provide a framework for solving inverse problems with diffusion models learned from linearly corrupted data. Our method, Ambient Diffusion Posterior Sampling (A-DPS), leverages a generative model pre-trained on one type of corruption (e.g. image inpainting) to perform posterior sampling conditioned on measurements from a potentially different forward process (e.g. image blurring). We test the efficacy of our approach on standard natural image datasets (CelebA, FFHQ, and AFHQ) and we show that A-DPS can sometimes outperform models trained on clean data for several image restoration tasks in both speed and performance. We further extend the Ambient Diffusion framework to train MRI models with access only to Fourier subsampled multi-coil MRI measurements at various acceleration factors (R$=2, 4, 6, 8$). We again observe that models trained on highly subsampled data are better priors for solving inverse problems in the high acceleration regime than models trained on fully sampled data.*
+<u> Abstract </u>: *We provide a framework for solving inverse problems with diffusion models learned from linearly corrupted data. Our method, Ambient Diffusion Posterior Sampling (A-DPS), leverages a generative model pre-trained on one type of corruption (e.g. image inpainting) to perform posterior sampling conditioned on measurements from a potentially different forward process (e.g. image blurring). We test the efficacy of our approach on standard natural image datasets (CelebA, FFHQ, and AFHQ) and we show that A-DPS can sometimes outperform models trained on clean data for several image restoration tasks in both speed and performance. We further extend the Ambient Diffusion framework to train MRI models with access only to Fourier subsampled multi-coil MRI measurements at various acceleration factors (R = 2, 4, 6, 8). We again observe that models trained on highly subsampled data are better priors for solving inverse problems in the high acceleration regime than models trained on fully sampled data.*
 
 ## Installation
 The recommended way to run the code is with an Anaconda/Miniconda environment.
 First, clone the repository: 
 
-`git clone https://github.com/asad-aali/ambient-diffusion-mri.git`.
+`git clone https://github.com/utcsilab/ambient-diffusion-mri.git`.
 
 Then, create a new Anaconda environment and install the dependencies:
 
@@ -25,21 +25,22 @@ You will also need to have `diffusers` installed from the source. To do so, run:
 
 ### Download pre-trained models
 
-We provide pre-trained Ambient Diffusion models trained on the FastMRI dataset, independently at acceleration rates of R=$2, 4, 6, 8$. Additionally, we provide a supervised EDM model trained on fully sampled (R=$1$) data.
-The checkpoints are available through the link: [link](https://zenodo.org/record/7964925/files/checkpoints.zip?download=1).
-You will need ~2GB of disk space for each model.
+We provide pre-trained Ambient Diffusion models trained on undersampled FastMRI data, independently at acceleration rates of R = 2, 4, 6, 8. Additionally, we provide a supervised EDM model trained on fully sampled (R = 1) data.
+The checkpoints are available through the link: [link](https://utexas.box.com/s/axofnwib9kukdpa92ge4ays87dmuvpf7).
+You will need ~1GB of disk space for the models.
 To download from the terminal, simply run:
 
-`wget https://zenodo.org/record/7964925/files/checkpoints.zip?download=1`
+`wget -v -O ambient_models.zip -L https://utexas.box.com/shared/static/axofnwib9kukdpa92ge4ays87dmuvpf7.zip`
 
-### Download datasets
+### Download dataset
 
-For the experiments, we used our pre-processed version of NYU's FastMRI dataset [here](https://fastmri.med.nyu.edu/).
+For the experiments, we used a pre-processed version of NYU's FastMRI dataset [here](https://fastmri.med.nyu.edu/). 
+
 To set up the dataset for training/inference, follow the instructions provided [here](https://github.com/NVlabs/edm#preparing-datasets).
 
 ## Training New Models
 
-To train a new Ambient Diffusion model on the FastMRI dataset, run the following bash script: ambient-diffusion-mri/train.sh
+To train a new Ambient Diffusion model on the FastMRI dataset, run the following bash script: `ambient-diffusion-mri/train.sh`
 
 ```
 R=4
@@ -66,7 +67,7 @@ torchrun --standalone --nproc_per_node=$GPUS_PER_NODE \
 
 ### Generate images from trained model
 
-To generate images from the trained model, run the following bash script: ambient-diffusion-mri/prior.sh:
+To generate images from the trained model, run the following bash script: `ambient-diffusion-mri/prior.sh`:
 
 ```
 R=4
@@ -93,7 +94,7 @@ This will generate 1000 images in the folder `<results/$EXPERIMENT_NAME>`.
 
 ### Posterior sampling using Ambient Diffusion Posterior Sampling (A-DPS)
 
-To generate posterior samples given a trained model, run the following bash script: ambient-diffusion-mri/solve_inverse_adps.sh:
+To generate posterior samples given a trained model, run the following bash script: `ambient-diffusion-mri/solve_inverse_adps.sh`:
 
 ```
 TRAINING_R=4
@@ -121,9 +122,9 @@ do
 done
 ```
 
-### Posterior sampling using One-Step Solution (1step)
+### Posterior sampling using Ambient One-Step (A-OS)
 
-To generate posterior samples given a trained model, run the following bash script: ambient-diffusion-mri/solve_inverse_1step.sh:
+To generate posterior samples given a trained model, run the following bash script: `ambient-diffusion-mri/solve_inverse_1step.sh`:
 
 ```
 R=4
