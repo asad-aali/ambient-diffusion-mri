@@ -1,4 +1,4 @@
-## Ambient Diffusion: Learning Clean Distributions from Corrupted Data
+## Ambient Diffusion Posterior Sampling: Solving Inverse Problems with Diffusion Models trained on Corrupted Data
 
 This repository hosts the official PyTorch implementation of the paper: [Ambient Diffusion Posterior Sampling: Solving Inverse Problems with Diffusion Models trained on Corrupted Data](https://arxiv.org/abs/2305.19256).
 
