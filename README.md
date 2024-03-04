@@ -1,100 +1,144 @@
 ## Ambient Diffusion: Learning Clean Distributions from Corrupted Data
 
-This repository hosts the official PyTorch implementation of the paper: [Ambient Diffusion: Learning Clean Distributions from Corrupted Data](https://arxiv.org/abs/2305.19256).
+This repository hosts the official PyTorch implementation of the paper: [Ambient Diffusion Posterior Sampling: Solving Inverse Problems with Diffusion Models trained on Corrupted Data](https://arxiv.org/abs/2305.19256).
 
 
-Authored by: Giannis Daras, Kulin Shah, Yuval Dagan, Aravind Gollakota, Alexandros G. Dimakis, Adam Klivans
+Authored by: Asad Aali, Giannis Daras, Brett Levac, Sidharth Kumar, Alexandros G. Dimakis, Jonathan I. Tamir
 
 <center>
 
-![](docs/fig1.jpeg)
+![](docs/prior.png)
 
 </center>
 
-<u> Abstract </u>: *We present the first diffusion-based framework that can learn an unknown distribution using only highly-corrupted samples. This problem arises in scientific applications where access to uncorrupted samples is impossible or expensive to acquire. Another benefit of our approach is the ability to train generative models that do not memorize any individual training sample, since they never observe clean training data.
- Our main idea is to introduce additional measurement distortion during the diffusion process and require the model to predict the original corrupted image from the further corrupted image.  We prove that our method leads to models that learn the conditional expectation of the full uncorrupted image given this additional measurement corruption.  This holds for any corruption process that satisfies some technical conditions (and in particular includes inpainting and compressed sensing).  We train models on standard benchmarks (CelebA, CIFAR-10 and AFHQ) and show that we can learn the distribution even when all the training samples have $90\%$ of their pixels missing. We also show that when we finetune foundation models using small corrupted datasets (e.g. MRI scans with block corruptions), we learn the clean distribution without memorizing the training set.*
+<u> Abstract </u>: *We provide a framework for solving inverse problems with diffusion models learned from linearly corrupted data. Our method, Ambient Diffusion Posterior Sampling (A-DPS), leverages a generative model pre-trained on one type of corruption (e.g. image inpainting) to perform posterior sampling conditioned on measurements from a potentially different forward process (e.g. image blurring). We test the efficacy of our approach on standard natural image datasets (CelebA, FFHQ, and AFHQ) and we show that A-DPS can sometimes outperform models trained on clean data for several image restoration tasks in both speed and performance. We further extend the Ambient Diffusion framework to train MRI models with access only to Fourier subsampled multi-coil MRI measurements at various acceleration factors (R$=2, 4, 6, 8$). We again observe that models trained on highly subsampled data are better priors for solving inverse problems in the high acceleration regime than models trained on fully sampled data.*
 
 ## Installation
 The recommended way to run the code is with an Anaconda/Miniconda environment.
 First, clone the repository: 
 
-`git clone https://github.com/giannisdaras/ambient-diffusion.git`.
+`git clone https://github.com/asad-aali/ambient-diffusion-mri.git`.
 
 Then, create a new Anaconda environment and install the dependencies:
 
 `conda env create -f environment.yml -n ambient`
 
-You will also need to have `diffusers` installed from source. To do so, run:
+You will also need to have `diffusers` installed from the source. To do so, run:
 
 `pip install git+https://github.com/huggingface/diffusers.git`
 
 ### Download pre-trained models
 
-We provide pre-trained models for AFHQ, CelebA-HQ and CIFAR-10 trained under different corruption levels. 
+We provide pre-trained Ambient Diffusion models trained on the FastMRI dataset, independently at acceleration rates of R=$2, 4, 6, 8$. Additionally, we provide a supervised EDM model trained on fully sampled (R=$1$) data.
 The checkpoints are available through the link: [link](https://zenodo.org/record/7964925/files/checkpoints.zip?download=1).
-You will neeed ~16GB of disk space for all the models.
+You will need ~2GB of disk space for each model.
 To download from the terminal, simply run:
 
 `wget https://zenodo.org/record/7964925/files/checkpoints.zip?download=1`
 
 ### Download datasets
 
-You might also need to download dataset and dataset statistics for training and for FID calculation.
-To do so, follow the instructions provided [here](https://github.com/NVlabs/edm#preparing-datasets).
-
-## Calculating FID
-
-To evaluate FID on the pre-trained models, run the following command:
-
-```
-EXPERIMENT_NAME=<experiment_name>
-GPUS_PER_NODE=<number_of_gpus>
-torchrun --standalone --nproc_per_node=$GPUS_PER_NODE \
-    eval.py --network=<path_to_folder_that_contains_the_pkl_file OR > \
-    --ref=<path_to_dataset_statistics> \
-    --outdir=<out_dir> \
-    --experiment_name=$EXPERIMENT_NAME \
-    --seeds=0-49999 --batch=16 \
-    --corruption_probability=<corruption_probability> --delta_probability=<delta_probability> --mask_full_rgb=True \
-    --num_masks=1 --guidance_scale=0.0 \
-    --training_options_loc=<path_to_training_options.json> \
-    --num=50000 --with_wandb=False
-```
+For the experiments, we used our pre-processed version of NYU's FastMRI dataset [here](https://fastmri.med.nyu.edu/).
+To set up the dataset for training/inference, follow the instructions provided [here](https://github.com/NVlabs/edm#preparing-datasets).
 
 ## Training New Models
 
-To train a new model on CelebA, run the following command:
+To train a new Ambient Diffusion model on the FastMRI dataset, run the following bash script: ambient-diffusion-mri/train.sh
 
 ```
-torchrun --standalone --nproc_per_node=<GPUS_PER_NODE>  \
-    train.py --outdir=<output_dir> --experiment_name=<experiment_name> --dump=200  \
-    --cond=0 --arch=ddpmpp --precond=ambient --cres=1,2,2,2 --lr=2e-4 --dropout=0.1 --augment=0.15 \
-    --data=<path_to_celeba_dataset> \
-    --norm=2 --max_grad_norm=1.0 --mask_full_rgb=True --corruption_probability=<corruption_probability> --delta_probability=<corruption_probability> --batch=256 --max_size=30000
+R=4
+EXPERIMENT_NAME=brainMRI_R=$R
+GPUS_PER_NODE=1
+GPU=0
+DATA_PATH=/path_to_dataset/numpy/ksp_brainMRI_384.zip
+OUTDIR=/path_to_output/models/$EXPERIMENT_NAME
+CORR=$R
+DELTA=5
+BATCH=8
+METHOD=ambient
+
+torchrun --standalone --nproc_per_node=$GPUS_PER_NODE \
+    train.py --gpu=$GPU --outdir=$OUTDIR --experiment_name=$EXPERIMENT_NAME \
+    --dump=200 --cond=0 --arch=ddpmpp \
+    --precond=$METHOD --cres=1,1,1,1 --lr=2e-4 --dropout=0.1 --augment=0 \
+    --data=$DATA_PATH --norm=2 --max_grad_norm=1.0 --mask_full_rgb=True \
+    --corruption_probability=$CORR --delta_probability=$DELTA --batch=$BATCH \
+    --normalize=False --fp16=True --wandb_id=$EXPERIMENT_NAME
 ```
 
+### Generate images from trained model
 
-## Finetuning Foundation Models
+To generate images from the trained model, run the following bash script: ambient-diffusion-mri/prior.sh:
 
-To finetune the IF model, run the following command:
+`
+R=4
+EXPERIMENT_NAME=brainMRI_prior_R=$R
+GPUS_PER_NODE=1
+GPU=0
+MODEL_PATH=/path_to_model/models/brainMRI_R=$R
+MAPS_PATH=/path_to_dataset/numpy/ksp_brainMRI_384.zip
+SEEDS=1000
+BATCH=8
 
-```
-accelerate launch --mixed_precision="no" --multi_gpu train_text_to_image.py          --resolution=64 --center_crop --random_flip         --train_batch_size=32         --gradient_accumulation_steps=1        --max_train_steps=15000         --max_grad_norm=1.0         --learning_rate=3e-6         --lr_scheduler="constant" --lr_warmup_steps=0         --output_dir=<output_dir>        --validation_prompts "person,"         --report_to="wandb"         --corruption_probability=<corruption_probability> --delta_probability=<delta_probability>         --use_8bit_adam         --allow_tf32 --corruption_pattern="dust" --train_data_dir=<path_to_dataset>  --empty_text --max_train_samples=3000 --seed=0
-```
+torchrun --standalone --nproc_per_node=$GPUS_PER_NODE \
+    prior.py --gpu=$GPU --network=$MODEL_PATH/  --maps_path=$MAPS_PATH\
+    --outdir=results/$EXPERIMENT_NAME \
+    --experiment_name=$EXPERIMENT_NAME \
+    --ref=$MODEL_PATH/stats.jsonl \
+    --seeds=$SEEDS --batch=$BATCH \
+    --mask_full_rgb=True --num_masks=1 --guidance_scale=0.0 \
+    --training_options_loc=$MODEL_PATH/training_options.json \
+    --num=$SEEDS --img_channels=2 --with_wandb=False
+`
 
-### Generate images from the finetuned model
+This will generate 1000 images in the folder `<results/$EXPERIMENT_NAME>`.
 
-To generate images from the finetuned model, run:
+### Posterior sampling using Ambient Diffusion Posterior Sampling (A-DPS)
 
-`python if_inference.py --checkpoint_path=<path_to_state_dict.pt> --output_dir=<output_dir> --batch_size=4 --corruption_probability=<corruption_probability>`
+To generate posterior samples given a trained model, run the following bash script: ambient-diffusion-mri/solve_inverse_adps.sh:
+`
+TRAINING_R=4
+EXPERIMENT_NAME=brainMRI_ambientDPS
+GPUS_PER_NODE=1
+GPU=0
+MODEL_PATH=/path_to_model/models/brainMRI_R=$TRAINING_R
+MEAS_PATH=/path_to_measurements
+STEPS=500
 
-This will generate 50000 images in the folder `<output_dir>`.
+for seed in 15
+do
+    for R in 2 4 6 8
+    do
+        for sample in {0..100}
+        do
+            torchrun --standalone --nproc_per_node=$GPUS_PER_NODE \
+            solve_inverse_adps.py --seed $seed --latent_seeds $seed --gpu $GPU \
+            --sample $sample --inference_R $R --training_R $TRAINING_R \
+            --l_ss 1 --num_steps $STEPS --S_churn 0 \
+            --measurements_path $MEAS_PATH --network $MODEL_PATH \
+            --outdir results/$EXPERIMENT_NAME --img_channels 2
+        done
+    done
+done
+`
+### Posterior sampling using One-Step Solution (1step)
 
-### Find nearest neighbors in the dataset
+To generate posterior samples given a trained model, run the following bash script: ambient-diffusion-mri/solve_inverse_1step.sh:
+`
+R=4
+EXPERIMENT_NAME=brainMRI_1step_R=$R
+GPUS_PER_NODE=1
+GPU=0
+MODEL_PATH=/path_to_model/models/brainMRI_R=$R
+MEAS_PATH=/path_to_measurements
+SEEDS=100
 
-You can run the following command to find for each generated image the nearest neighbors in the dataset using DINO.
-
-```
-python find_dataset_neighbors.py --input_dir=<model_outputs> --output_dir=<output_dir> 
---data=<dataset_path> --features_path=celeba_features.npy --max_size=10000
-```
+torchrun --standalone --nproc_per_node=$GPUS_PER_NODE \
+    solve_inverse_1step.py --gpu=$GPU --network=$MODEL_PATH/ \
+    --outdir=results/$EXPERIMENT_NAME \
+    --experiment_name=$EXPERIMENT_NAME \
+    --ref=$MODEL_PATH/stats.jsonl \
+    --seeds=$SEEDS --batch=1 \
+    --mask_full_rgb=True --training_options_loc=$MODEL_PATH/training_options.json \
+    --measurements_path=$MEAS_PATH --num=2 --img_channels=2 --with_wandb=False
+`
