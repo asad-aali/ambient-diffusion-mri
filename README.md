@@ -7,7 +7,7 @@ Authored by: Asad Aali, Giannis Daras, Brett Levac, Sidharth Kumar, Alexandros G
 
 <center>
 
-<img src="https://github.com/asad-aali/ambient-diffusion-mri/blob/main/docs/prior.png" width="128">
+<img src="https://github.com/asad-aali/ambient-diffusion-mri/blob/main/docs/prior.png" width="512">
 
 </center>
 
