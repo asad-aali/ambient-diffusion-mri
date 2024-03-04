@@ -62,11 +62,13 @@ torchrun --standalone --nproc_per_node=$GPUS_PER_NODE \
     --normalize=False --fp16=True --wandb_id=$EXPERIMENT_NAME
 ```
 
+## Sampling
+
 ### Generate images from trained model
 
 To generate images from the trained model, run the following bash script: ambient-diffusion-mri/prior.sh:
 
-`
+```
 R=4
 EXPERIMENT_NAME=brainMRI_prior_R=$R
 GPUS_PER_NODE=1
@@ -85,14 +87,15 @@ torchrun --standalone --nproc_per_node=$GPUS_PER_NODE \
     --mask_full_rgb=True --num_masks=1 --guidance_scale=0.0 \
     --training_options_loc=$MODEL_PATH/training_options.json \
     --num=$SEEDS --img_channels=2 --with_wandb=False
-`
+```
 
 This will generate 1000 images in the folder `<results/$EXPERIMENT_NAME>`.
 
 ### Posterior sampling using Ambient Diffusion Posterior Sampling (A-DPS)
 
 To generate posterior samples given a trained model, run the following bash script: ambient-diffusion-mri/solve_inverse_adps.sh:
-`
+
+```
 TRAINING_R=4
 EXPERIMENT_NAME=brainMRI_ambientDPS
 GPUS_PER_NODE=1
@@ -116,11 +119,13 @@ do
         done
     done
 done
-`
+```
+
 ### Posterior sampling using One-Step Solution (1step)
 
 To generate posterior samples given a trained model, run the following bash script: ambient-diffusion-mri/solve_inverse_1step.sh:
-`
+
+```
 R=4
 EXPERIMENT_NAME=brainMRI_1step_R=$R
 GPUS_PER_NODE=1
@@ -137,4 +142,4 @@ torchrun --standalone --nproc_per_node=$GPUS_PER_NODE \
     --seeds=$SEEDS --batch=1 \
     --mask_full_rgb=True --training_options_loc=$MODEL_PATH/training_options.json \
     --measurements_path=$MEAS_PATH --num=2 --img_channels=2 --with_wandb=False
-`
+```
