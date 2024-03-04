@@ -7,7 +7,7 @@ Authored by: Asad Aali, Giannis Daras, Brett Levac, Sidharth Kumar, Alexandros G
 
 <center>
 
-![](docs/prior.png)
+![](docs/prior.png width="10")
 
 </center>
 
