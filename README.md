@@ -26,21 +26,23 @@ You will also need to have `diffusers` installed from the source. To do so, run:
 ### Download pre-trained models
 
 We provide pre-trained Ambient Diffusion models trained on undersampled FastMRI data, independently at acceleration rates of R = 2, 4, 6, 8. Additionally, we provide a supervised EDM model trained on fully sampled (R = 1) data.
-The checkpoints are available through the link: [link](https://utexas.box.com/s/axofnwib9kukdpa92ge4ays87dmuvpf7).
-You will need ~1GB of disk space for the models.
+The checkpoints are available [here](https://utexas.box.com/s/axofnwib9kukdpa92ge4ays87dmuvpf7).
+
 To download from the terminal, simply run:
 
 `wget -v -O ambient_models.zip -L https://utexas.box.com/shared/static/axofnwib9kukdpa92ge4ays87dmuvpf7.zip`
 
 ### Download dataset
 
-For the experiments, we used a pre-processed version of NYU's FastMRI dataset [here](https://fastmri.med.nyu.edu/). 
+For the experiments, we used a pre-processed version of NYU's [FastMRI dataset](https://fastmri.med.nyu.edu/). 
 
 To set up the dataset for training/inference, follow the instructions provided [here](https://github.com/NVlabs/edm#preparing-datasets).
 
 ## Training New Models
 
-To train a new Ambient Diffusion model on the FastMRI dataset, run the following bash script: `ambient-diffusion-mri/train.sh`
+To train a new Ambient Diffusion model on the FastMRI dataset, run the following bash script: 
+
+`ambient-diffusion-mri/train.sh`
 
 ```
 R=4
@@ -67,7 +69,9 @@ torchrun --standalone --nproc_per_node=$GPUS_PER_NODE \
 
 ### Generate images from trained model
 
-To generate images from the trained model, run the following bash script: `ambient-diffusion-mri/prior.sh`:
+To generate images from the trained model, run the following bash script: 
+
+`ambient-diffusion-mri/prior.sh`:
 
 ```
 R=4
@@ -94,7 +98,9 @@ This will generate 1000 images in the folder `<results/$EXPERIMENT_NAME>`.
 
 ### Posterior sampling using Ambient Diffusion Posterior Sampling (A-DPS)
 
-To generate posterior samples given a trained model, run the following bash script: `ambient-diffusion-mri/solve_inverse_adps.sh`:
+To generate posterior samples given a trained model, run the following bash script: 
+
+`ambient-diffusion-mri/solve_inverse_adps.sh`:
 
 ```
 TRAINING_R=4
@@ -124,7 +130,9 @@ done
 
 ### Posterior sampling using Ambient One-Step (A-OS)
 
-To generate posterior samples given a trained model, run the following bash script: `ambient-diffusion-mri/solve_inverse_1step.sh`:
+To generate posterior samples given a trained model, run the following bash script: 
+
+`ambient-diffusion-mri/solve_inverse_1step.sh`:
 
 ```
 R=4
