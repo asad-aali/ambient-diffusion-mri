@@ -110,6 +110,7 @@ GPU=0
 MODEL_PATH=/path_to_model/models/brainMRI_R=$TRAINING_R
 MEAS_PATH=/path_to_measurements
 STEPS=500
+METHOD=ambient
 
 for seed in 15
 do
@@ -122,7 +123,7 @@ do
             --sample $sample --inference_R $R --training_R $TRAINING_R \
             --l_ss 1 --num_steps $STEPS --S_churn 0 \
             --measurements_path $MEAS_PATH --network $MODEL_PATH \
-            --outdir results/$EXPERIMENT_NAME --img_channels 2
+            --outdir results/$EXPERIMENT_NAME --img_channels 2 --method $METHOD
         done
     done
 done
@@ -151,4 +152,16 @@ torchrun --standalone --nproc_per_node=$GPUS_PER_NODE \
     --seeds=$SEEDS --batch=1 \
     --mask_full_rgb=True --training_options_loc=$MODEL_PATH/training_options.json \
     --measurements_path=$MEAS_PATH --num=2 --img_channels=2 --with_wandb=False
+```
+
+## FID Score Calculation
+
+The following script was used for calculating the FID scores: 
+
+`ambient-diffusion-mri/fid.sh`:
+
+Example:
+```
+python fid.py ref --data=path_to_ref_data --dest=path_to_ref_scores.npz
+torchrun --standalone --nproc_per_node=1 fid.py calc --images=path_to_priors --ref=path_to_ref_scores.npz
 ```

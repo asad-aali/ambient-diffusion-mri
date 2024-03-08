@@ -5,6 +5,7 @@ GPU=0
 MODEL_PATH=/home/asad/ambient-diffusion-mri/models/brainMRI_R=$TRAINING_R
 MEAS_PATH=/csiNAS/asad/data/brain_fastMRI/val_samples_ambient
 STEPS=500
+METHOD=edm
 
 for seed in 15
 do
@@ -17,7 +18,7 @@ do
             --sample $sample --inference_R $R --training_R $TRAINING_R \
             --l_ss 1 --num_steps $STEPS --S_churn 0 \
             --measurements_path $MEAS_PATH --network $MODEL_PATH \
-            --outdir results/$EXPERIMENT_NAME --img_channels 2
+            --outdir results/$EXPERIMENT_NAME --img_channels 2 --method $METHOD
         done
     done
 done

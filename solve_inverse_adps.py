@@ -205,6 +205,7 @@ parser.add_argument('--scaling', type=str, default='none') # ['vp', 'none']
 parser.add_argument('--outdir', type=str, default='none') # ['vp', 'none']
 parser.add_argument('--network', type=str, default='none') # ['vp', 'none']
 parser.add_argument('--img_channels', type=int, default=2) # ['vp', 'none']
+parser.add_argument('--method', type=str, default='none') # ['edm', 'ambient']
 
 args   = parser.parse_args()
 
@@ -246,33 +247,46 @@ results_dir = args.outdir + "/trained_r=%d_delta_prob%d/sample%d/seed%d/R=%d"%(a
 if not os.path.exists(results_dir):
     os.makedirs(results_dir)
 
-# load network
-training_options_loc = args.network + "/training_options.json"
-with dnnlib.util.open_url(training_options_loc, verbose=(dist.get_rank() == 0)) as f:
-    training_options = json.load(f)
-    label_dim = 0
+if args.method == 'ambient':
+    # load network
+    training_options_loc = args.network + "/training_options.json"
+    with dnnlib.util.open_url(training_options_loc, verbose=(dist.get_rank() == 0)) as f:
+        training_options = json.load(f)
+        label_dim = 0
 
-img_channels = args.img_channels
-if args.training_R == 1:
-    interface_kwargs = dict(img_resolution=training_options['dataset_kwargs']['resolution'], label_dim=label_dim, img_channels=img_channels)
+    img_channels = args.img_channels
+    if args.training_R == 1:
+        interface_kwargs = dict(img_resolution=training_options['dataset_kwargs']['resolution'], label_dim=label_dim, img_channels=img_channels)
+    else:
+        interface_kwargs = dict(img_resolution=training_options['dataset_kwargs']['resolution'], label_dim=label_dim, img_channels=img_channels*2)
+        
+    network_kwargs = training_options['network_kwargs']
+    model_to_be_initialized = dnnlib.util.construct_class_by_name(**network_kwargs, **interface_kwargs) # subclass of torch.nn.Module
+
+    net_save = args.network + "/network-snapshot.pkl"
+    if dist.get_rank() != 0:
+            torch.distributed.barrier()
+    dist.print0(f'Loading network from "{net_save}"...')
+    with dnnlib.util.open_url(net_save, verbose=(dist.get_rank() == 0)) as f:
+        loaded_obj = pickle.load(f)['ema']
+        modified_dict = OrderedDict({key.replace('_orig_mod.', ''):val for key, val in loaded_obj.items()})
+        net = model_to_be_initialized
+        net.load_state_dict(modified_dict)
+
+    net = net.to(device)
+
 else:
-    interface_kwargs = dict(img_resolution=training_options['dataset_kwargs']['resolution'], label_dim=label_dim, img_channels=img_channels*2)
-     
-network_kwargs = training_options['network_kwargs']
-model_to_be_initialized = dnnlib.util.construct_class_by_name(**network_kwargs, **interface_kwargs) # subclass of torch.nn.Module
+    # load network
+    net_save = args.network + "/network-snapshot.pkl"
+    if dist.get_rank() != 0:
+            torch.distributed.barrier()
+    dist.print0(f'Loading network from "{net_save}"...')
+    with dnnlib.util.open_url(net_save, verbose=(dist.get_rank() == 0)) as f:
+        net = pickle.load(f)['ema'].to(device)
+    args.training_R = 1
 
-net_save = args.network + "/network-snapshot.pkl"
-if dist.get_rank() != 0:
-        torch.distributed.barrier()
-dist.print0(f'Loading network from "{net_save}"...')
-with dnnlib.util.open_url(net_save, verbose=(dist.get_rank() == 0)) as f:
-    loaded_obj = pickle.load(f)['ema']
-    modified_dict = OrderedDict({key.replace('_orig_mod.', ''):val for key, val in loaded_obj.items()})
-    net = model_to_be_initialized
-    net.load_state_dict(modified_dict)
-
-net = net.to(device)
-
+total_params = sum(p.numel() for p in net.parameters())
+print(f"Number of parameters: {total_params}")
 # Pick latents and labels.
 rnd = StackedRandomGenerator(device, args.latent_seeds)
 latents = rnd.randn([batch_size, 2, gt_img.shape[-2], gt_img.shape[-1]], device=device)
