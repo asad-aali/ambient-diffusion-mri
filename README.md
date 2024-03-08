@@ -5,7 +5,7 @@ This repository hosts the official PyTorch implementation of the paper: [Ambient
 
 Authored by: Asad Aali, Giannis Daras, Brett Levac, Sidharth Kumar, Alexandros G. Dimakis, Jonathan I. Tamir
 
-<center><img src="https://github.com/asad-aali/ambient-diffusion-mri/blob/main/docs/all_priors.png" width="512"></center>
+<center><img src="https://github.com/asad-aali/ambient-diffusion-mri/blob/main/docs/all_priors.png" width="1024"></center>
 
 <u> Abstract </u>: *We provide a framework for solving inverse problems with diffusion models learned from linearly corrupted data. Our method, Ambient Diffusion Posterior Sampling (A-DPS), leverages a generative model pre-trained on one type of corruption (e.g. image inpainting) to perform posterior sampling conditioned on measurements from a potentially different forward process (e.g. image blurring). We test the efficacy of our approach on standard natural image datasets (CelebA, FFHQ, and AFHQ) and we show that A-DPS can sometimes outperform models trained on clean data for several image restoration tasks in both speed and performance. We further extend the Ambient Diffusion framework to train MRI models with access only to Fourier subsampled multi-coil MRI measurements at various acceleration factors (R = 2, 4, 6, 8). We again observe that models trained on highly subsampled data are better priors for solving inverse problems in the high acceleration regime than models trained on fully sampled data.*
 
@@ -30,9 +30,7 @@ From our experiments, we share nine (9) pre-trained models:
 2. Four Ambient Diffusion models trained on undersampled FastMRI data at acceleration rates of R = 2, 4, 6, 8. 
 3. Four EDM models trained after L1-Wavelet compressed sensing reconstruction of the training set at acceleration rates of R = 2, 4, 6, 8.
 
-The checkpoints are available [here](https://utexas.box.com/s/axofnwib9kukdpa92ge4ays87dmuvpf7).
-
-To download from the terminal, simply run:
+The checkpoints are available [here](https://utexas.box.com/s/axofnwib9kukdpa92ge4ays87dmuvpf7). To download from the terminal, simply run:
 
 `wget -v -O ambient_models.zip -L https://utexas.box.com/shared/static/axofnwib9kukdpa92ge4ays87dmuvpf7.zip`
 
