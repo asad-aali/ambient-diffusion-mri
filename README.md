@@ -25,7 +25,7 @@ You will also need to have `diffusers` installed from the source. To do so, run:
 
 ### Download pre-trained models
 
-We provide pre-trained Ambient Diffusion models trained on undersampled FastMRI data, independently at acceleration rates of R = 2, 4, 6, 8. Additionally, we provide a supervised EDM model trained on fully sampled (R = 1) data.
+We provide pre-trained Ambient Diffusion models trained on undersampled FastMRI data, independently at acceleration rates of R = 2, 4, 6, 8. Additionally, we provide a supervised EDM model trained on fully sampled (R = 1) data. We also provide four EDM models trained after L1-Wavelet compressed sensing reconstruction of the training set at each acceleration factor.
 The checkpoints are available [here](https://utexas.box.com/s/axofnwib9kukdpa92ge4ays87dmuvpf7).
 
 To download from the terminal, simply run:
@@ -163,5 +163,6 @@ The following script was used for calculating the FID scores:
 Example:
 ```
 python fid.py ref --data=path_to_ref_data --dest=path_to_ref_scores.npz
+
 torchrun --standalone --nproc_per_node=1 fid.py calc --images=path_to_priors --ref=path_to_ref_scores.npz
 ```
