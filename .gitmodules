@@ -1,0 +1,3 @@
+[submodule "ambient-diffusion-inverse"]
+	path = ambient-diffusion-inverse
+	url = https://github.com/asad-aali/ambient-diffusion-inverse.git
