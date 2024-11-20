@@ -12,6 +12,7 @@ import json
 from collections import OrderedDict
 import torch
 import numpy as np
+import sys
 
 class MRI_utils:
     def __init__(self, mask, maps):
@@ -161,7 +162,7 @@ def general_forward_SDE_ps(
             E_x_start = (1/s(t_cur))*(x_cur + (s(t_cur)**2)*(denoised-x_cur))
             Ax = mri_inf_utils.forward(x=E_x_start)
         elif l_type == 'ALD':
-            Ax = mri_inf_utils.forward(x=x_cur)
+            Ax = mri_inf_utils.forward(x=denoised)
 
         residual = y - Ax  
         residual = residual.reshape(latents.shape[0],-1)
@@ -217,36 +218,6 @@ np.random.seed(args.seed)
 device=torch.device('cuda')
 batch_size=len(args.latent_seeds)
 
-#load data and preprocess
-data_file = args.measurements_path + "/sample_%d.pt"%args.sample
-cont = torch.load(data_file)
-mask_str = 'mask_%d'%args.inference_R
-
-gt_img = cont['gt'][None,None,...].cuda() #shape [1,1,384,320]
-s_maps = fftmod(cont['s_map'])[None,...].cuda() # shape [1,16,384,320]
-fs_ksp = fftmod(cont['ksp'])[None,...].cuda() #shape [1,16,384,320]
-mask = cont[mask_str][None, ...].cuda() # shape [1,1,384,320]
-ksp = mask*fs_ksp
-
-# setup MRI forward model + utilities for inferance mask
-mri_inf_utils = MRI_utils(maps=s_maps,mask=mask)
-adj_img = mri_inf_utils.adjoint(ksp)
-
-# setup MRI forward model + utilities for training mask
-corruption_mask = torch.ones([1, 2, ksp.shape[2], ksp.shape[3]]).cuda()
-args.delta_prob = args.training_R
-
-if args.training_R > 1:
-    args.delta_prob = args.training_R+1
-    corruption_mask[:,0] = create_masks(args.training_R, args.delta_prob, 20, ksp.shape[-2], ksp.shape[-1])[None]
-
-mri_train_utils = MRI_utils(maps=s_maps, mask=corruption_mask[:,0])
-
-# designate + create save directory
-results_dir = args.outdir + "/trained_r=%d_delta_prob%d/sample%d/seed%d/R=%d"%(args.training_R, args.delta_prob, args.sample,args.seed, args.inference_R)
-if not os.path.exists(results_dir):
-    os.makedirs(results_dir)
-
 if args.method == 'ambient':
     # load network
     training_options_loc = args.network + "/training_options.json"
@@ -285,39 +256,75 @@ else:
         net = pickle.load(f)['ema'].to(device)
     args.training_R = 1
 
-total_params = sum(p.numel() for p in net.parameters())
-print(f"Number of parameters: {total_params}")
-# Pick latents and labels.
-rnd = StackedRandomGenerator(device, args.latent_seeds)
-latents = rnd.randn([batch_size, 2, gt_img.shape[-2], gt_img.shape[-1]], device=device)
-class_labels = None
+for args.sample in range(100):
+    # designate + create save directory
+    args.delta_prob = args.training_R+1
+    results_dir = args.outdir + "/trained_r=%d_delta_prob%d/sample%d/seed%d/R=%d"%(args.training_R, args.delta_prob, args.sample, args.seed, args.inference_R)
+    if not os.path.exists(results_dir):
+        os.makedirs(results_dir)
 
-image_recon = general_forward_SDE_ps(y=ksp,  gt_img=gt_img, mri_inf_utils=mri_inf_utils, mri_train_utils=mri_train_utils, corruption_mask=corruption_mask, task='mri', l_type='DPS', l_ss=args.l_ss, 
-    net=net, latents=latents, class_labels=None, randn_like=torch.randn_like,
-    num_steps=args.num_steps, sigma_min=0.004, sigma_max=args.sigma_max, rho=7,
-    solver=args.solver, discretization=args.discretization, schedule='linear', scaling=args.scaling,
-    epsilon_s=1e-3, C_1=0.001, C_2=0.008, M=1000, alpha=1,
-    S_churn=args.S_churn, S_min=0, S_max=float('inf'), S_noise=1, verbose = True, training_R = args.training_R)
+    if os.path.isfile(results_dir + '/checkpoint.pt'):
+        print(results_dir + "/checkpoint.pt" + " already exists!")
+        continue
 
-cplx_recon = torch.view_as_complex(image_recon.permute(0,-2,-1,1).contiguous())[:,None] #shape: [1,1,H,W]
+    #load data and preprocess
+    data_file = args.measurements_path + "/sample_%d.pt"%args.sample
+    cont = torch.load(data_file)
+    mask_str = 'mask_%d'%args.inference_R
 
-cplx_recon=cplx_recon.detach().cpu().numpy()
-mean_recon=np.mean(cplx_recon,axis=0)[None]
-gt_img=gt_img.cpu().numpy()
-img_nrmse = nrmse_np(abs(gt_img[0,0]), abs(mean_recon[0,0]))
-img_SSIM = ssim(abs(gt_img[0,0]), abs(mean_recon[0,0]), data_range=abs(gt_img[0,0]).max() - abs(gt_img[0,0]).min())
-img_PSNR = psnr(gt=abs(gt_img[0,0]), est=abs(mean_recon[0]),max_pixel=np.amax(abs(gt_img)))
+    gt_img = cont['gt'][None,None,...].cuda() #shape [1,1,384,320]
+    s_maps = fftmod(cont['s_map'])[None,...].cuda() # shape [1,16,384,320]
+    fs_ksp = fftmod(cont['ksp'])[None,...].cuda() #shape [1,16,384,320]
+    mask = cont[mask_str][None, ...].cuda() # shape [1,1,384,320]
+    ksp = mask*fs_ksp
 
-# print('cplx net out shape: ',cplx_recon.shape)
-print('Sample %d, seed %d, R: %d, NRMSE: %.3f, SSIM: %.3f, PSNR: %.3f'%(args.sample, args.seed, args.inference_R, img_nrmse, img_SSIM, img_PSNR))
+    # setup MRI forward model + utilities for inferance mask
+    mri_inf_utils = MRI_utils(maps=s_maps,mask=mask)
+    adj_img = mri_inf_utils.adjoint(ksp)
 
-dict = { 
-        'gt_img': gt_img,
-        'recon': cplx_recon,
-        'adj_img': adj_img.cpu().numpy(),
-        'nrmse': img_nrmse,
-        'ssim': img_SSIM,
-        'psnr': img_PSNR
-}
+    # setup MRI forward model + utilities for training mask
+    corruption_mask = torch.ones([1, 2, ksp.shape[2], ksp.shape[3]]).cuda()
+    args.delta_prob = args.training_R
 
-torch.save(dict, results_dir + '/checkpoint.pt')
+    if args.training_R > 1:
+        args.delta_prob = args.training_R+1
+        corruption_mask[:,0] = create_masks(args.training_R, args.delta_prob, 20, ksp.shape[-2], ksp.shape[-1])[None]
+
+    mri_train_utils = MRI_utils(maps=s_maps, mask=corruption_mask[:,0])
+
+    total_params = sum(p.numel() for p in net.parameters())
+    print(f"Number of parameters: {total_params}")
+    # Pick latents and labels.
+    rnd = StackedRandomGenerator(device, args.latent_seeds)
+    latents = rnd.randn([batch_size, 2, gt_img.shape[-2], gt_img.shape[-1]], device=device)
+    class_labels = None
+
+    image_recon = general_forward_SDE_ps(y=ksp,  gt_img=gt_img, mri_inf_utils=mri_inf_utils, mri_train_utils=mri_train_utils, corruption_mask=corruption_mask, task='mri', l_type='ALD', l_ss=args.l_ss, 
+        net=net, latents=latents, class_labels=None, randn_like=torch.randn_like,
+        num_steps=args.num_steps, sigma_min=0.004, sigma_max=args.sigma_max, rho=7,
+        solver=args.solver, discretization=args.discretization, schedule='linear', scaling=args.scaling,
+        epsilon_s=1e-3, C_1=0.001, C_2=0.008, M=1000, alpha=1,
+        S_churn=args.S_churn, S_min=0, S_max=float('inf'), S_noise=1, verbose = True, training_R = args.training_R)
+
+    cplx_recon = torch.view_as_complex(image_recon.permute(0,-2,-1,1).contiguous())[:,None] #shape: [1,1,H,W]
+
+    cplx_recon=cplx_recon.detach().cpu().numpy()
+    mean_recon=np.mean(cplx_recon,axis=0)[None]
+    gt_img=gt_img.cpu().numpy()
+    img_nrmse = nrmse_np(abs(gt_img[0,0]), abs(mean_recon[0,0]))
+    img_SSIM = ssim(abs(gt_img[0,0]), abs(mean_recon[0,0]), data_range=abs(gt_img[0,0]).max() - abs(gt_img[0,0]).min())
+    img_PSNR = psnr(gt=abs(gt_img[0,0]), est=abs(mean_recon[0]),max_pixel=np.amax(abs(gt_img)))
+
+    # print('cplx net out shape: ',cplx_recon.shape)
+    print('Sample %d, seed %d, R: %d, NRMSE: %.3f, SSIM: %.3f, PSNR: %.3f'%(args.sample, args.seed, args.inference_R, img_nrmse, img_SSIM, img_PSNR))
+
+    dict = { 
+            'gt_img': gt_img,
+            'recon': cplx_recon,
+            'adj_img': adj_img.cpu().numpy(),
+            'nrmse': img_nrmse,
+            'ssim': img_SSIM,
+            'psnr': img_PSNR
+    }
+
+    torch.save(dict, results_dir + '/checkpoint.pt')
